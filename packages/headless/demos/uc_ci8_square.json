@@ -1,0 +1,26 @@
+{
+  "video": { "width": 192, "height": 120, "origin": "0xF000" },
+  "timing": { "start": 2, "interval": 3, "frames": 2, "spOffset": 1 },
+  "allocBase": "0x20000",
+  "tluts": [
+    { "addr": "0x21000", "entries": [ "0x0000", "0x07C0" ] }
+  ],
+  "blobs": [
+    { "addr": "0x22000", "dataHex": "0101010101010101010101010101010101010101010101010101010101010101" }
+  ],
+  "frames": [
+    [
+      { "op": "Gradient", "bgStart": "0x003F", "bgEnd": "0x07FF" },
+      { "op": "SetTLUT", "tlutAddr": "0x21000", "count": 256 },
+      { "op": "DrawCI8", "w": 16, "h": 16, "addr": "0x22000", "x": 50, "y": 30 },
+      { "op": "End" }
+    ],
+    [
+      { "op": "Gradient", "bgStart": "0x003F", "bgEnd": "0x07FF" },
+      { "op": "SetTLUT", "tlutAddr": "0x21000", "count": 256 },
+      { "op": "DrawCI8", "w": 16, "h": 16, "addr": "0x22000", "x": 51, "y": 30 },
+      { "op": "End" }
+    ]
+  ]
+}
+

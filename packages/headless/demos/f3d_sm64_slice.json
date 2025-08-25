@@ -1,0 +1,18 @@
+{
+  "video": { "width": 192, "height": 120, "origin": "0xF000" },
+  "timing": { "start": 2, "interval": 3, "frames": 2, "spOffset": 1 },
+  "allocBase": "0x40000",
+  "frames": [
+    [
+      { "op": "G_GRADIENT", "bgStart": "0x003F", "bgEnd": "0x07FF" },
+      { "op": "G_SM64_SLICE", "spacing": 10, "offsetX": 0 },
+      { "op": "G_END" }
+    ],
+    [
+      { "op": "G_GRADIENT", "bgStart": "0x003F", "bgEnd": "0x07FF" },
+      { "op": "G_SM64_SLICE", "spacing": 10, "offsetX": 1 },
+      { "op": "G_END" }
+    ]
+  ]
+}
+

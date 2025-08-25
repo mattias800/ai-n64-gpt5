@@ -1,0 +1,16 @@
+{
+  "name": "@n64/headless",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "n64-headless": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --clean && tsc -b"
+  },
+  "dependencies": {
+    "@n64/core": "file:../core"
+  }
+}
+

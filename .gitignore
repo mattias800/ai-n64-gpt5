@@ -1,0 +1,17 @@
+# Node / JS
+node_modules/
+dist/
+coverage/
+.pnpm-store/
+*.log
+
+# OS / Editor
+.DS_Store
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Build artifacts
+packages/**/dist/
+packages/**/build/
