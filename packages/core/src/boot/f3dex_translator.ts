@@ -255,6 +255,12 @@ export function translateF3DEXToUc(bus: Pick<Bus, 'loadU32'>, dlAddr: number, ma
         out.push({ op: 'ClearZ', value });
         break;
       }
+      case 0xEB: { // Mock: SET_BLEND_MODE (w1: 0=OFF,1=AVERAGE_50,2=SRC_OVER_A1)
+        const m = (w1 & 0x3) >>> 0;
+        const mode = m === 2 ? 'SRC_OVER_A1' as const : m === 1 ? 'AVERAGE_50' as const : 'OFF' as const;
+        out.push({ op: 'SetBlendMode', mode });
+        break;
+      }
       default:
         // Parse G_SETTILE (0xF5): CI4 palette is in bits 20..23 of w1 for many F3D variants
         if (op === 0xF5) {
