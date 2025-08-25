@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { Bus, RDRAM, CPU, System, runSM64TitleDemoDP, runSM64TitleDemoSPDP, writeSM64TitleTasksToRDRAM, scheduleSPTitleTasksFromRDRAMAndRun, writeRSPTitleDLsToRDRAM, scheduleRSPDLFramesAndRun, writeUcAsRspdl, f3dToUc, scheduleRSPDLFromTableAndRun, scheduleF3DEXFromTableAndRun } from '@n64/core';
+import { Bus, RDRAM, CPU, System, runSM64TitleDemoDP, runSM64TitleDemoSPDP, writeSM64TitleTasksToRDRAM, scheduleSPTitleTasksFromRDRAMAndRun, writeRSPTitleDLsToRDRAM, scheduleRSPDLFramesAndRun, writeUcAsRspdl, f3dToUc, scheduleRSPDLFromTableAndRun, scheduleF3DEXFromTableAndRun, hlePiLoadSegments } from '@n64/core';
 
 function parseNum(val: string | undefined, def: number): number {
   if (val === undefined) return def;
@@ -66,10 +66,17 @@ async function maybeWriteImage(out: Uint8Array, w: number, h: number, filePath?:
 function printUsage() {
   console.log(`Usage:
   n64-headless sm64-demo [--frames N] [--width W] [--height H] [--origin 0xADDR] [--spacing N] [--start CYC] [--interval CYC] [--mode dp|spdp|sptask|rspdl] [--sp-offset CYC] [--snapshot path.ppm]
+  n64-headless rspdl-ci8-ring [--frames N] [--width W] [--height H] [--origin 0xADDR] [--start CYC] [--interval CYC] [--sp-offset CYC] [--snapshot path.png]
+  n64-headless uc-run <config.json> [--snapshot path.png]
+  n64-headless f3d-run <config.json> [--snapshot path.png]
+  n64-headless f3d-run-table <config.json> [--snapshot path.png]
+  n64-headless f3dex-run-table <config.json> [--snapshot path.png]
+  n64-headless f3dex-rom-run <config.json> [--snapshot path.png]
 
 Examples:
   n64-headless sm64-demo --frames 1
   n64-headless sm64-demo --frames 2 --snapshot tmp/sm64_2f.ppm
+  n64-headless f3dex-rom-run tmp/rom_demo.json --snapshot tmp/rom.png
 `);
 }
 
@@ -632,6 +639,76 @@ async function runF3dexRunTable(args: string[]) {
   console.log(JSON.stringify({ command: 'f3dex-run-table', cfg: { width, height, origin, start, interval, frames, spOffset }, perFrameCRC32: perFrame, crc32: crc32(image), acks: res, snapshot: snapshot||null }, null, 2));
 }
 
+async function runF3dexRomRun(args: string[]) {
+  const file = args.find(a => !a.startsWith('--'));
+  if (!file) {
+    console.error('f3dex-rom-run requires a JSON config path');
+    process.exit(1);
+  }
+  const opts: Record<string, string> = {};
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a.startsWith('--')) {
+      const key = a.slice(2);
+      const next = (i + 1 < args.length) ? args[i + 1] : undefined;
+      const val = (next && !next.startsWith('--')) ? args[++i]! : '1';
+      opts[key] = val;
+    }
+  }
+  const snapshot = opts['snapshot'];
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const text = fs.readFileSync(file, 'utf8');
+  const cfg = JSON.parse(text);
+  const toNum = (v: any, d=0) => (typeof v === 'number' ? v>>>0 : (typeof v === 'string' ? parseNum(v, d) : d)) >>> 0;
+
+  const width = toNum(cfg.video?.width, 192);
+  const height = toNum(cfg.video?.height, 120);
+  const origin = toNum(cfg.video?.origin, 0xF000);
+  const start = toNum(cfg.timing?.start, 2);
+  const interval = toNum(cfg.timing?.interval, 3);
+  const frames = toNum(cfg.timing?.frames, 1);
+  const spOffset = toNum(cfg.timing?.spOffset, 1);
+
+  const tableBase = toNum(cfg.f3dex?.tableBase, 0);
+  const stagingBase = toNum(cfg.f3dex?.stagingBase, (origin + width*height*2 + 0x8000)>>>0);
+  const strideWords = toNum(cfg.f3dex?.strideWords, 256);
+
+  const bgStart = cfg.bg ? toNum(cfg.bg.start5551, undefined as any) : undefined;
+  const bgEnd = cfg.bg ? toNum(cfg.bg.end5551, undefined as any) : undefined;
+
+  const romPath = String(cfg.rom || cfg.romPath || '');
+  if (!romPath) { console.error('Config must include rom or romPath'); process.exit(1); }
+  const romAbs = path.isAbsolute(romPath) ? romPath : path.resolve(path.dirname(file), romPath);
+  const romBytes = fs.readFileSync(romAbs);
+
+  const rdram = new RDRAM(1 << 22); // allow a larger RDRAM region for ROM loads
+  const bus = new Bus(rdram);
+  const cpu = new CPU(bus);
+  const sys = new System(cpu, bus);
+  bus.setROM(new Uint8Array(romBytes));
+
+  if (Array.isArray(cfg.piLoads)) {
+    const segs = cfg.piLoads.map((s: any) => ({ cartAddr: toNum(s.cartAddr), dramAddr: toNum(s.dramAddr), length: toNum(s.length) }));
+    hlePiLoadSegments(bus, segs, true);
+  }
+
+  const total = start + interval * frames + 2;
+  const { image, frames: imgs, res } = scheduleF3DEXFromTableAndRun(cpu, bus, sys, origin, width, height, tableBase, frames, stagingBase, strideWords, start, interval, total, spOffset, bgStart, bgEnd);
+  const perFrame: string[] = [];
+  for (let i = 0; i < imgs.length; i++) {
+    if (snapshot) {
+      const extMatch = snapshot.match(/\.(png|ppm)$/i);
+      const ext = extMatch ? extMatch[0] : '.png';
+      const basePath = snapshot.replace(/\.(png|ppm)$/i, '');
+      const outPath = `${basePath}_f${i}${ext}`;
+      await maybeWriteImage(imgs[i]!, width, height, outPath);
+    }
+    perFrame.push(crc32(imgs[i]!));
+  }
+  console.log(JSON.stringify({ command: 'f3dex-rom-run', cfg: { width, height, origin, start, interval, frames, spOffset, tableBase, stagingBase, strideWords }, perFrameCRC32: perFrame, crc32: crc32(image), acks: res, snapshot: snapshot||null }, null, 2));
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   const cmd = argv[0];
@@ -661,6 +738,10 @@ async function main() {
   }
   if (cmd === 'f3dex-run-table') {
     await runF3dexRunTable(argv.slice(1));
+    return;
+  }
+  if (cmd === 'f3dex-rom-run') {
+    await runF3dexRomRun(argv.slice(1));
     return;
   }
   printUsage();
