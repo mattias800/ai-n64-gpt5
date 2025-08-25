@@ -238,6 +238,12 @@ export function translateF3DEXToUc(bus: Pick<Bus, 'loadU32'>, dlAddr: number, ma
               x2: b.x|0, y2: b.y|0, s2: (b.s??0)|0, t2: (b.t??0)|0, q2: (b.q??1)>>>0,
               x3: c.x|0, y3: c.y|0, s3: (c.s??0)|0, t3: (c.t??0)|0, q3: (c.q??1)>>>0,
             } as any);
+          } else if (imgFmt === 'CI4') {
+            out.push({ op: 'DrawCI4TriPersp', addr: imgAddr>>>0, texW: tw|0, texH: th|0,
+              x1: a.x|0, y1: a.y|0, s1: (a.s??0)|0, t1: (a.t??0)|0, q1: (a.q??1)>>>0,
+              x2: b.x|0, y2: b.y|0, s2: (b.s??0)|0, t2: (b.t??0)|0, q2: (b.q??1)>>>0,
+              x3: c.x|0, y3: c.y|0, s3: (c.s??0)|0, t3: (c.t??0)|0, q3: (c.q??1)>>>0,
+            } as any);
           }
         }
         break;
