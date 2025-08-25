@@ -186,6 +186,7 @@ async function runRspdlCi8Ring(args: string[]) {
   const interval = parseNum(opts['interval'], 3);
   const frameCount = parseNum(opts['frames'], 2);
   const spOffset = parseNum(opts['sp-offset'], 1);
+  const snapshot = opts['snapshot'];
 
   const rdram = new RDRAM(1 << 19);
   const bus = new Bus(rdram);
@@ -234,8 +235,18 @@ async function runRspdlCi8Ring(args: string[]) {
 
   const total = start + interval * frameCount + 2;
   const { image, frames, res } = scheduleRSPDLFramesAndRun(cpu, bus, sys, origin, width, height, dlBase, frameCount, start, interval, total, spOffset, strideWords);
-  const perFrame = frames.map(crc32);
-  console.log(JSON.stringify({ command: 'rspdl-ci8-ring', cfg: { width, height, origin, start, interval, frameCount, spOffset }, perFrameCRC32: perFrame, crc32: crc32(image), acks: res }, null, 2));
+  const perFrame: string[] = [];
+  for (let i = 0; i < frames.length; i++) {
+    if (snapshot) {
+      const extMatch = snapshot.match(/\.(png|ppm)$/i);
+      const ext = extMatch ? extMatch[0] : '.png';
+      const basePath = snapshot.replace(/\.(png|ppm)$/i, '');
+      const path = `${basePath}_f${i}${ext}`;
+      await maybeWriteImage(frames[i]!, width, height, path);
+    }
+    perFrame.push(crc32(frames[i]!));
+  }
+  console.log(JSON.stringify({ command: 'rspdl-ci8-ring', cfg: { width, height, origin, start, interval, frameCount, spOffset }, perFrameCRC32: perFrame, crc32: crc32(image), acks: res, snapshot: snapshot||null }, null, 2));
 }
 
 async function runUcRun(args: string[]) {
@@ -254,6 +265,7 @@ async function runUcRun(args: string[]) {
       opts[key] = val;
     }
   }
+  const snapshot = opts['snapshot'];
   const fs = await import('node:fs');
   const text = fs.readFileSync(file, 'utf8');
   const cfg = JSON.parse(text);
@@ -322,8 +334,18 @@ async function runUcRun(args: string[]) {
 
   const total = start + interval * frames + 2;
   const { image, frames: imgs, res } = scheduleRSPDLFramesAndRun(cpu, bus, sys, origin, width, height, dlBase, frames, start, interval, total, spOffset, strideWords);
-  const perFrame = imgs.map(crc32);
-  console.log(JSON.stringify({ command: 'uc-run', cfg: { width, height, origin, start, interval, frames, spOffset }, perFrameCRC32: perFrame, crc32: crc32(image), acks: res }, null, 2));
+  const perFrame: string[] = [];
+  for (let i = 0; i < imgs.length; i++) {
+    if (snapshot) {
+      const extMatch = snapshot.match(/\.(png|ppm)$/i);
+      const ext = extMatch ? extMatch[0] : '.png';
+      const basePath = snapshot.replace(/\.(png|ppm)$/i, '');
+      const path = `${basePath}_f${i}${ext}`;
+      await maybeWriteImage(imgs[i]!, width, height, path);
+    }
+    perFrame.push(crc32(imgs[i]!));
+  }
+  console.log(JSON.stringify({ command: 'uc-run', cfg: { width, height, origin, start, interval, frames, spOffset }, perFrameCRC32: perFrame, crc32: crc32(image), acks: res, snapshot: snapshot||null }, null, 2));
 }
 
 async function runF3dRun(args: string[]) {
@@ -332,6 +354,17 @@ async function runF3dRun(args: string[]) {
     console.error('f3d-run requires a JSON file path');
     process.exit(1);
   }
+  const opts: Record<string, string> = {};
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a.startsWith('--')) {
+      const key = a.slice(2);
+      const next = (i + 1 < args.length) ? args[i + 1] : undefined;
+      const val = (next && !next.startsWith('--')) ? args[++i]! : '1';
+      opts[key] = val;
+    }
+  }
+  const snapshot = opts['snapshot'];
   const fs = await import('node:fs');
   const text = fs.readFileSync(file, 'utf8');
   const cfg = JSON.parse(text);
@@ -397,8 +430,18 @@ async function runF3dRun(args: string[]) {
 
   const total = start + interval * frames + 2;
   const { image, frames: imgs, res } = scheduleRSPDLFramesAndRun(cpu, bus, sys, origin, width, height, dlBase, frames, start, interval, total, spOffset, strideWords);
-  const perFrame = imgs.map(crc32);
-  console.log(JSON.stringify({ command: 'f3d-run', cfg: { width, height, origin, start, interval, frames, spOffset }, perFrameCRC32: perFrame, crc32: crc32(image), acks: res }, null, 2));
+  const perFrame: string[] = [];
+  for (let i = 0; i < imgs.length; i++) {
+    if (snapshot) {
+      const extMatch = snapshot.match(/\.(png|ppm)$/i);
+      const ext = extMatch ? extMatch[0] : '.png';
+      const basePath = snapshot.replace(/\.(png|ppm)$/i, '');
+      const path = `${basePath}_f${i}${ext}`;
+      await maybeWriteImage(imgs[i]!, width, height, path);
+    }
+    perFrame.push(crc32(imgs[i]!));
+  }
+  console.log(JSON.stringify({ command: 'f3d-run', cfg: { width, height, origin, start, interval, frames, spOffset }, perFrameCRC32: perFrame, crc32: crc32(image), acks: res, snapshot: snapshot||null }, null, 2));
 }
 
 async function runF3dRunTable(args: string[]) {
@@ -407,6 +450,17 @@ async function runF3dRunTable(args: string[]) {
     console.error('f3d-run-table requires a JSON file path');
     process.exit(1);
   }
+  const opts: Record<string, string> = {};
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a.startsWith('--')) {
+      const key = a.slice(2);
+      const next = (i + 1 < args.length) ? args[i + 1] : undefined;
+      const val = (next && !next.startsWith('--')) ? args[++i]! : '1';
+      opts[key] = val;
+    }
+  }
+  const snapshot = opts['snapshot'];
   const fs = await import('node:fs');
   const text = fs.readFileSync(file, 'utf8');
   const cfg = JSON.parse(text);
@@ -473,8 +527,18 @@ async function runF3dRunTable(args: string[]) {
 
   const total = start + interval * frames + 2;
   const { image, frames: imgs, res } = scheduleRSPDLFromTableAndRun(cpu, bus, sys, origin, width, height, tableBase, frames, start, interval, total, spOffset, strideWords);
-  const perFrame = imgs.map(crc32);
-  console.log(JSON.stringify({ command: 'f3d-run-table', cfg: { width, height, origin, start, interval, frames, spOffset }, perFrameCRC32: perFrame, crc32: crc32(image), acks: res }, null, 2));
+  const perFrame: string[] = [];
+  for (let i = 0; i < imgs.length; i++) {
+    if (snapshot) {
+      const extMatch = snapshot.match(/\.(png|ppm)$/i);
+      const ext = extMatch ? extMatch[0] : '.png';
+      const basePath = snapshot.replace(/\.(png|ppm)$/i, '');
+      const path = `${basePath}_f${i}${ext}`;
+      await maybeWriteImage(imgs[i]!, width, height, path);
+    }
+    perFrame.push(crc32(imgs[i]!));
+  }
+  console.log(JSON.stringify({ command: 'f3d-run-table', cfg: { width, height, origin, start, interval, frames, spOffset }, perFrameCRC32: perFrame, crc32: crc32(image), acks: res, snapshot: snapshot||null }, null, 2));
 }
 
 async function runF3dexRunTable(args: string[]) {
@@ -483,6 +547,17 @@ async function runF3dexRunTable(args: string[]) {
     console.error('f3dex-run-table requires a JSON file path');
     process.exit(1);
   }
+  const opts: Record<string, string> = {};
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a.startsWith('--')) {
+      const key = a.slice(2);
+      const next = (i + 1 < args.length) ? args[i + 1] : undefined;
+      const val = (next && !next.startsWith('--')) ? args[++i]! : '1';
+      opts[key] = val;
+    }
+  }
+  const snapshot = opts['snapshot'];
   const fs = await import('node:fs');
   const text = fs.readFileSync(file, 'utf8');
   const cfg = JSON.parse(text);
@@ -543,8 +618,18 @@ async function runF3dexRunTable(args: string[]) {
     tableBase, frames, stagingBase, strideWords,
     start, interval, total, spOffset,
   );
-  const perFrame = imgs.map(crc32);
-  console.log(JSON.stringify({ command: 'f3dex-run-table', cfg: { width, height, origin, start, interval, frames, spOffset }, perFrameCRC32: perFrame, crc32: crc32(image), acks: res }, null, 2));
+  const perFrame: string[] = [];
+  for (let i = 0; i < imgs.length; i++) {
+    if (snapshot) {
+      const extMatch = snapshot.match(/\.(png|ppm)$/i);
+      const ext = extMatch ? extMatch[0] : '.png';
+      const basePath = snapshot.replace(/\.(png|ppm)$/i, '');
+      const path = `${basePath}_f${i}${ext}`;
+      await maybeWriteImage(imgs[i]!, width, height, path);
+    }
+    perFrame.push(crc32(imgs[i]!));
+  }
+  console.log(JSON.stringify({ command: 'f3dex-run-table', cfg: { width, height, origin, start, interval, frames, spOffset }, perFrameCRC32: perFrame, crc32: crc32(image), acks: res, snapshot: snapshot||null }, null, 2));
 }
 
 async function main() {
