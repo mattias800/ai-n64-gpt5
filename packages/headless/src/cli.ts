@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { Bus, RDRAM, CPU, System, runSM64TitleDemoDP, runSM64TitleDemoSPDP, writeSM64TitleTasksToRDRAM, scheduleSPTitleTasksFromRDRAMAndRun, writeRSPTitleDLsToRDRAM, scheduleRSPDLFramesAndRun, writeUcAsRspdl, f3dToUc, scheduleRSPDLFromTableAndRun, scheduleF3DEXFromTableAndRun, hlePiLoadSegments } from '@n64/core';
+import { Bus, RDRAM, CPU, System, runSM64TitleDemoDP, runSM64TitleDemoSPDP, writeSM64TitleTasksToRDRAM, scheduleSPTitleTasksFromRDRAMAndRun, writeRSPTitleDLsToRDRAM, scheduleRSPDLFramesAndRun, writeUcAsRspdl, f3dToUc, scheduleRSPDLFromTableAndRun, scheduleF3DEXFromTableAndRun, hlePiLoadSegments, decompressMIO0 } from '@n64/core';
 
 function parseNum(val: string | undefined, def: number): number {
   if (val === undefined) return def;
@@ -72,6 +72,7 @@ function printUsage() {
   n64-headless f3d-run-table <config.json> [--snapshot path.png]
   n64-headless f3dex-run-table <config.json> [--snapshot path.png]
   n64-headless f3dex-rom-run <config.json> [--snapshot path.png]
+  n64-headless sm64-rom-title <config.json> [--snapshot path.png]
 
 Examples:
   n64-headless sm64-demo --frames 1
@@ -709,6 +710,132 @@ async function runF3dexRomRun(args: string[]) {
   console.log(JSON.stringify({ command: 'f3dex-rom-run', cfg: { width, height, origin, start, interval, frames, spOffset, tableBase, stagingBase, strideWords }, perFrameCRC32: perFrame, crc32: crc32(image), acks: res, snapshot: snapshot||null }, null, 2));
 }
 
+type TileCfg = {
+  format: 'CI8' | 'CI4';
+  tlutAddr: number;
+  tlutCount?: number;
+  pixAddr: number;
+  w: number;
+  h: number;
+  x: number;
+  y: number;
+  ci4Palette?: number; // 0..15
+};
+
+function writeF3dexTileDL(bus: Bus, pStart: number, tile: TileCfg): number {
+  let p = pStart >>> 0;
+  function storeU32(v: number) { bus.storeU32(p, v >>> 0); p = (p + 4) >>> 0; }
+  function fp(x: number) { return (x << 2) >>> 0; }
+  function pack12(hi: number, lo: number) { return (((hi & 0xFFF) << 12) | (lo & 0xFFF)) >>> 0; }
+  const OP_SETTIMG = 0xFD << 24;
+  const SIZ = tile.format === 'CI8' ? (1 << 19) : (0 << 19);
+  storeU32((OP_SETTIMG | SIZ) >>> 0); storeU32(tile.pixAddr >>> 0);
+  const OP_LOADTLUT = 0xF0 << 24; storeU32((OP_LOADTLUT | (tile.tlutCount ?? (tile.format === 'CI8' ? 256 : 32))) >>> 0); storeU32(tile.tlutAddr >>> 0);
+  const OP_SETTILESIZE = 0xF2 << 24; storeU32((OP_SETTILESIZE | pack12(fp(0), fp(0))) >>> 0); storeU32(pack12(fp(tile.w - 1), fp(tile.h - 1)) >>> 0);
+  if (tile.format === 'CI4' && tile.ci4Palette !== undefined) {
+    // G_SETTILE to carry palette in w1 bits 20..23
+    const OP_SETTILE = 0xF5 << 24; const pal = (tile.ci4Palette & 0xF) >>> 0; const w1 = (pal << 20) >>> 0; storeU32(OP_SETTILE >>> 0); storeU32(w1 >>> 0);
+  }
+  const OP_TEXRECT = 0xE4 << 24; storeU32((OP_TEXRECT | pack12(fp(tile.x), fp(tile.y))) >>> 0); storeU32(pack12(fp(tile.x + tile.w), fp(tile.y + tile.h)) >>> 0);
+  return p >>> 0;
+}
+
+async function runSm64RomTitle(args: string[]) {
+  const file = args.find(a => !a.startsWith('--'));
+  if (!file) { console.error('sm64-rom-title requires a JSON config path'); process.exit(1); }
+  const opts: Record<string, string> = {};
+  for (let i = 0; i < args.length; i++) { const a = args[i]!; if (a.startsWith('--')) { const key = a.slice(2); const next = (i + 1 < args.length) ? args[i + 1] : undefined; const val = (next && !next.startsWith('--')) ? args[++i]! : '1'; opts[key] = val; } }
+  const snapshot = opts['snapshot'];
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const text = fs.readFileSync(file, 'utf8');
+  const cfg = JSON.parse(text);
+  const num = (v: any, d=0) => (typeof v === 'number' ? v>>>0 : (typeof v === 'string' ? parseNum(v, d) : d)) >>> 0;
+
+  const width = num(cfg.video?.width, 192);
+  const height = num(cfg.video?.height, 120);
+  const origin = num(cfg.video?.origin, 0xF000);
+  const start = num(cfg.timing?.start, 2);
+  const interval = num(cfg.timing?.interval, 3);
+  const frames = num(cfg.timing?.frames, 2);
+  const spOffset = num(cfg.timing?.spOffset, 1);
+
+  const romPath = String(cfg.rom || cfg.romPath || '');
+  if (!romPath) { console.error('Config must include rom or romPath'); process.exit(1); }
+  const romAbs = path.isAbsolute(romPath) ? romPath : path.resolve(path.dirname(file), romPath);
+  const romBytes = fs.readFileSync(romAbs);
+
+  const rdram = new RDRAM(1 << 22);
+  const bus = new Bus(rdram);
+  const cpu = new CPU(bus);
+  const sys = new System(cpu, bus);
+  bus.setROM(new Uint8Array(romBytes));
+
+  // Load assets via PI or MIO0 as directed
+  const piLoads: { cartAddr: number; dramAddr: number; length: number }[] = [];
+  if (Array.isArray(cfg.assets?.loads)) {
+    for (const L of cfg.assets.loads) {
+      const kind = String(L.kind || L.type || 'rom');
+      if (kind === 'rom') {
+        piLoads.push({ cartAddr: num(L.srcRom), dramAddr: num(L.dest), length: num(L.length) });
+      } else if (kind === 'mio0') {
+        const srcOff = num(L.srcRom); const dest = num(L.dest);
+        const decompressed = decompressMIO0(new Uint8Array(romBytes), srcOff);
+        for (let i = 0; i < decompressed.length; i++) bus.storeU8(dest + i, decompressed[i]!);
+      }
+    }
+  }
+  if (piLoads.length) hlePiLoadSegments(bus, piLoads, true);
+
+  // Build per-frame F3DEX DLs for tiles
+  const tilesIn: any[] = Array.isArray(cfg.assets?.tiles) ? cfg.assets.tiles : [];
+  const tileCfgBase: TileCfg[] = tilesIn.map((t) => ({
+    format: (String(t.format || 'CI8') as 'CI8'|'CI4'),
+    tlutAddr: num(t.tlutAddr),
+    tlutCount: t.tlutCount !== undefined ? num(t.tlutCount) : undefined,
+    pixAddr: num(t.pixAddr),
+    w: num(t.w), h: num(t.h), x: num(t.x), y: num(t.y),
+    ci4Palette: t.ci4Palette !== undefined ? num(t.ci4Palette) : undefined,
+  }));
+
+  const fbBytes = width * height * 2;
+  const base = num(cfg.allocBase, (origin + fbBytes + 0x9000) >>> 0);
+  const tableBase = base >>> 0;
+  const dl0 = (base + 0x400) >>> 0;
+  const stagingBase = num(cfg.stagingBase, (base + 0x8000) >>> 0);
+  const strideWords = num(cfg.strideWords, 1024 >>> 2);
+
+  for (let f=0; f<frames; f++) {
+    const dlAddr = (dl0 + f * strideWords * 4) >>> 0;
+    let p = dlAddr >>> 0;
+    // optional background gradient
+    if (cfg.bg) { bus.storeU32(p, 0x00000001); p+=4; bus.storeU32(p, num(cfg.bg.start5551)); p+=4; bus.storeU32(p, num(cfg.bg.end5551)); p+=4; }
+    // tiles for this frame; allow small X offset per frame
+    const dx = num(cfg.layout?.offsetPerFrameX, 1) * f;
+    for (const t of tileCfgBase) {
+      const t2: TileCfg = { ...t, x: (t.x + dx)|0 };
+      p = writeF3dexTileDL(bus as any, p, t2);
+    }
+    bus.storeU32(p, 0xDF000000>>>0); p+=4; bus.storeU32(p, 0);
+    bus.storeU32(tableBase + f*4, dlAddr>>>0);
+  }
+
+  const total = start + interval * frames + 2;
+  const { image, frames: imgs, res } = scheduleF3DEXFromTableAndRun(cpu, bus, sys, origin, width, height, tableBase, frames, stagingBase, strideWords, start, interval, total, spOffset);
+  const perFrame: string[] = [];
+  for (let i = 0; i < imgs.length; i++) {
+    if (snapshot) {
+      const extMatch = snapshot.match(/\.(png|ppm)$/i);
+      const ext = extMatch ? extMatch[0] : '.png';
+      const basePath = snapshot.replace(/\.(png|ppm)$/i, '');
+      const outPath = `${basePath}_f${i}${ext}`;
+      await maybeWriteImage(imgs[i]!, width, height, outPath);
+    }
+    perFrame.push(crc32(imgs[i]!));
+  }
+  console.log(JSON.stringify({ command: 'sm64-rom-title', cfg: { width, height, origin, start, interval, frames, spOffset }, perFrameCRC32: perFrame, crc32: crc32(image), acks: res, snapshot: snapshot||null }, null, 2));
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   const cmd = argv[0];
@@ -742,6 +869,10 @@ async function main() {
   }
   if (cmd === 'f3dex-rom-run') {
     await runF3dexRomRun(argv.slice(1));
+    return;
+  }
+  if (cmd === 'sm64-rom-title') {
+    await runSm64RomTitle(argv.slice(1));
     return;
   }
   printUsage();

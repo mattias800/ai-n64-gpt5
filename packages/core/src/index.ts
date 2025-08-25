@@ -21,4 +21,5 @@ export { ucToRspdlWords, writeUcAsRspdl } from './boot/ucode_translator.js';
 export { f3dToUc } from './boot/f3d_translator.js';
 export { translateF3DEXToUc } from './boot/f3dex_translator.js';
 export { readControllerState } from './input/input.js';
+export { decompressMIO0 } from './utils/mio0.js';
 
