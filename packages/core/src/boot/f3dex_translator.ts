@@ -280,6 +280,11 @@ export function translateF3DEXToUc(bus: Pick<Bus, 'loadU32'>, dlAddr: number, ma
         // Parse G_SETTILE (0xF5): CI4 palette is in bits 20..23 of w1 for many F3D variants
         if (op === 0xF5) {
           ci4Palette = ((w1 >>> 20) & 0xF) >>> 0;
+          // Mock: decode CLAMP/WRAP/MIRROR from cms/cmt fields
+          const cms = (w1 >>> 8) & 0x3;
+          const cmt = (w1 >>> 18) & 0x3;
+          const modeFrom = (v: number): 'CLAMP' | 'WRAP' | 'MIRROR' => (v === 2 ? 'CLAMP' : v === 1 ? 'MIRROR' : 'WRAP');
+          out.push({ op: 'SetTexAddrMode', sMode: modeFrom(cms), tMode: modeFrom(cmt) });
           break;
         }
         // ignore unknowns
