@@ -164,7 +164,7 @@ function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number,
           if (currentCI4Palette >>> 0) {
             const offset = (currentCI4Palette & 0xF) * 16;
             for (let i = 0; i < packed.length; i++) {
-              const byte = packed[i] >>> 0;
+              const byte = (packed[i] ?? 0) >>> 0;
               const hi = (byte >>> 4) & 0xF; const lo = byte & 0xF;
               const hi2 = ((hi + offset) & 0xFF) >>> 0;
               const lo2 = ((lo + offset) & 0xFF) >>> 0;
@@ -335,7 +335,7 @@ function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number,
                   const i10 = ram[texAddr + (t0i*texW + s1i)] ?? 0;
                   const i01 = ram[texAddr + (t1i*texW + s0i)] ?? 0;
                   const i11 = ram[texAddr + (t1i*texW + s1i)] ?? 0;
-                  const c00 = tlut[i00]>>>0, c10 = tlut[i10]>>>0, c01 = tlut[i01]>>>0, c11 = tlut[i11]>>>0;
+                  const c00 = (tlut[i00] ?? 0)>>>0, c10 = (tlut[i10] ?? 0)>>>0, c01 = (tlut[i01] ?? 0)>>>0, c11 = (tlut[i11] ?? 0)>>>0;
                   const r00=(c00>>>11)&0x1f, g00=(c00>>>6)&0x1f, b00=(c00>>>1)&0x1f, a00=c00&1;
                   const r10=(c10>>>11)&0x1f, g10=(c10>>>6)&0x1f, b10=(c10>>>1)&0x1f, a10=c10&1;
                   const r01=(c01>>>11)&0x1f, g01=(c01>>>6)&0x1f, b01=(c01>>>1)&0x1f, a01=c01&1;
@@ -350,7 +350,7 @@ function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number,
                   const tt = nearestIndex(t, texH, texTMode);
                   idx = (ram[texAddr + (tt*texW + ss)] ?? 0) >>> 0;
                 }
-                const color = outColor !== null ? (outColor >>> 0) : tlut[idx!] >>> 0;
+                const color = outColor !== null ? (outColor >>> 0) : ((tlut[idx!] ?? 0) >>> 0);
                 if ((color & 1) !== 0) {
                   const addrPix = origin + (y * stride + x) * 2;
                   if (x < scX0 || x >= scX1 || y < scY0 || y >= scY1) { /* clipped */ }
@@ -431,7 +431,7 @@ function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number,
                   const i10 = sampleCI4(texAddr, texW, s1i, t0i) + paletteOffset;
                   const i01 = sampleCI4(texAddr, texW, s0i, t1i) + paletteOffset;
                   const i11 = sampleCI4(texAddr, texW, s1i, t1i) + paletteOffset;
-                  const c00 = tlut[i00 & 0xFF]>>>0, c10 = tlut[i10 & 0xFF]>>>0, c01 = tlut[i01 & 0xFF]>>>0, c11 = tlut[i11 & 0xFF]>>>0;
+                  const c00 = (tlut[i00 & 0xFF] ?? 0)>>>0, c10 = (tlut[i10 & 0xFF] ?? 0)>>>0, c01 = (tlut[i01 & 0xFF] ?? 0)>>>0, c11 = (tlut[i11 & 0xFF] ?? 0)>>>0;
                   const r00=(c00>>>11)&0x1f, g00=(c00>>>6)&0x1f, b00=(c00>>>1)&0x1f, a00=c00&1;
                   const r10=(c10>>>11)&0x1f, g10=(c10>>>6)&0x1f, b10=(c10>>>1)&0x1f, a10=c10&1;
                   const r01=(c01>>>11)&0x1f, g01=(c01>>>6)&0x1f, b01=(c01>>>1)&0x1f, a01=c01&1;
@@ -445,7 +445,7 @@ function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number,
                   const ss = nearestIndex(sF, texW, texSMode);
                   const tt = nearestIndex(tF, texH, texTMode);
                   const idx4 = sampleCI4(texAddr, texW, ss, tt) + paletteOffset;
-                  color = tlut[idx4 & 0xFF] >>> 0;
+                  color = (tlut[idx4 & 0xFF] ?? 0) >>> 0;
                 }
                 if ((color & 1) !== 0) {
                   const addrPix = origin + (y * stride + x) * 2;
@@ -493,7 +493,7 @@ function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number,
                   const nb = bilinearNeighbors(sf, tf, texW, texH, texSMode, texTMode);
                   const { s0i, s1i, t0i, t1i, a, b } = nb;
                   const i00 = ram[texAddr + (t0i*texW + s0i)] ?? 0; const i10 = ram[texAddr + (t0i*texW + s1i)] ?? 0; const i01 = ram[texAddr + (t1i*texW + s0i)] ?? 0; const i11 = ram[texAddr + (t1i*texW + s1i)] ?? 0;
-                  const c00=tlut[i00]>>>0, c10=tlut[i10]>>>0, c01=tlut[i01]>>>0, c11=tlut[i11]>>>0;
+                  const c00=(tlut[i00] ?? 0)>>>0, c10=(tlut[i10] ?? 0)>>>0, c01=(tlut[i01] ?? 0)>>>0, c11=(tlut[i11] ?? 0)>>>0;
                   const r00=(c00>>>11)&0x1f, g00=(c00>>>6)&0x1f, b00=(c00>>>1)&0x1f, a00=c00&1;
                   const r10=(c10>>>11)&0x1f, g10=(c10>>>6)&0x1f, b10=(c10>>>1)&0x1f, a10=c10&1;
                   const r01=(c01>>>11)&0x1f, g01=(c01>>>6)&0x1f, b01=(c01>>>1)&0x1f, a01=c01&1;
@@ -508,7 +508,7 @@ function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number,
                   const tt = nearestIndex(tf, texH, texTMode);
                   idx = (ram[texAddr + (tt*texW + ss)] ?? 0) >>> 0;
                 }
-                const color = outColor !== null ? (outColor >>> 0) : tlut[idx!]>>>0;
+                const color = outColor !== null ? (outColor >>> 0) : ((tlut[idx!] ?? 0)>>>0);
                 if((color&1)!==0){ const p=origin+(y*stride+x)*2; if (x < scX0 || x >= scX1 || y < scY0 || y >= scY1) { /* clipped */ } else if(p+1<ram.length){ ram[p]=(color>>>8)&0xff; ram[p+1]=color&0xff; } }
               }
             }
@@ -551,7 +551,7 @@ function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number,
                   const i10 = sampleCI4(texAddr, texW, s1i, t0i) + paletteOffset;
                   const i01 = sampleCI4(texAddr, texW, s0i, t1i) + paletteOffset;
                   const i11 = sampleCI4(texAddr, texW, s1i, t1i) + paletteOffset;
-                  const c00=tlut[i00&0xFF]>>>0, c10=tlut[i10&0xFF]>>>0, c01=tlut[i01&0xFF]>>>0, c11=tlut[i11&0xFF]>>>0;
+                  const c00=(tlut[i00&0xFF] ?? 0)>>>0, c10=(tlut[i10&0xFF] ?? 0)>>>0, c01=(tlut[i01&0xFF] ?? 0)>>>0, c11=(tlut[i11&0xFF] ?? 0)>>>0;
                   const r00=(c00>>>11)&0x1f, g00=(c00>>>6)&0x1f, b00=(c00>>>1)&0x1f, a00=c00&1;
                   const r10=(c10>>>11)&0x1f, g10=(c10>>>6)&0x1f, b10=(c10>>>1)&0x1f, a10=c10&1;
                   const r01=(c01>>>11)&0x1f, g01=(c01>>>6)&0x1f, b01=(c01>>>1)&0x1f, a01=c01&1;
@@ -564,7 +564,7 @@ function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number,
                 } else {
                   const ss = nearestIndex(sF, texW, texSMode);
                   const tt = nearestIndex(tF, texH, texTMode);
-                  const idx4 = sampleCI4(texAddr,texW,ss,tt)+paletteOffset; color = tlut[idx4&0xFF]>>>0;
+                  const idx4 = sampleCI4(texAddr,texW,ss,tt)+paletteOffset; color = (tlut[idx4&0xFF] ?? 0)>>>0;
                 }
                 if((color&1)!==0){ const p=origin+(y*stride+x)*2; if(p+1<ram.length){ ram[p]=(color>>>8)&0xff; ram[p+1]=color&0xff; } }
               }

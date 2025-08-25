@@ -10,7 +10,8 @@
     "typecheck": "tsc -b --clean && tsc -b"
   },
   "dependencies": {
-    "@n64/core": "file:../core"
+    "@n64/core": "file:../core",
+    "pngjs": "^7.0.0"
   }
 }
 

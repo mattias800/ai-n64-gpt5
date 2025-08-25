@@ -23,15 +23,33 @@ function crc32(data: Uint8Array): string {
   return (crc >>> 0).toString(16).padStart(8, '0');
 }
 
-function maybeWritePPM(out: Uint8Array, w: number, h: number, filePath?: string) {
+async function maybeWriteImage(out: Uint8Array, w: number, h: number, filePath?: string) {
   if (!filePath) return;
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const fs = require('node:fs') as typeof import('node:fs');
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const path = require('node:path') as typeof import('node:path');
-    const dir = path.dirname(filePath);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const [{ existsSync, mkdirSync, createWriteStream, writeFileSync }, pathMod] = await Promise.all([
+    import('node:fs').then(m => ({
+      existsSync: (m as any).existsSync as (p: string) => boolean,
+      mkdirSync: (m as any).mkdirSync as (p: string, opts?: any) => void,
+      createWriteStream: (m as any).createWriteStream as (p: string) => any,
+      writeFileSync: (m as any).writeFileSync as (p: string, data: any) => void,
+    })),
+    import('node:path') as Promise<typeof import('node:path')>,
+  ]);
+  const dir = pathMod.dirname(filePath);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  const lower = filePath.toLowerCase();
+  if (lower.endsWith('.png')) {
+    const mod: any = await import('pngjs');
+    const PNG = mod.PNG || mod.default?.PNG || mod.default || mod;
+    const png = new PNG({ width: w, height: h });
+    // out is RGBA8888 already
+    (png as any).data = Buffer.from(out);
+    await new Promise<void>((resolve, reject) => {
+      png.pack().pipe(createWriteStream(filePath)).on('finish', resolve).on('error', reject);
+    });
+    // eslint-disable-next-line no-console
+    console.log(`[snapshot] wrote ${filePath}`);
+  } else {
+    // Fallback to PPM (P6)
     const header = Buffer.from(`P6\n${w} ${h}\n255\n`, 'ascii');
     const data = Buffer.alloc(w * h * 3);
     for (let i = 0, di = 0; i < out.length; i += 4) {
@@ -39,11 +57,9 @@ function maybeWritePPM(out: Uint8Array, w: number, h: number, filePath?: string)
       data[di++] = out[i + 1]!;
       data[di++] = out[i + 2]!;
     }
-    fs.writeFileSync(filePath, Buffer.concat([header, data]));
+    writeFileSync(filePath, Buffer.concat([header, data]));
     // eslint-disable-next-line no-console
     console.log(`[snapshot] wrote ${filePath}`);
-  } catch (_) {
-    // ignore in non-fs environments
   }
 }
 
@@ -126,16 +142,20 @@ async function runSm64Demo(args: string[]) {
   } else {
     ({ image, frames: frameImages, res } = runSM64TitleDemoDP(cpu, bus, sys, cfg));
   }
-  const perFrame = frameImages.map((img, i) => {
+  const perFrame: string[] = [];
+  for (let i = 0; i < frameImages.length; i++) {
+    const img = frameImages[i]!;
     if (snapshot) {
-      const base = snapshot.replace(/\.ppm$/i, '');
-      const path = `${base}_f${i}.ppm`;
-      maybeWritePPM(img, width, height, path);
+      const extMatch = snapshot.match(/\.(png|ppm)$/i);
+      const ext = extMatch ? extMatch[0] : '.png';
+      const base = snapshot.replace(/\.(png|ppm)$/i, '');
+      const path = `${base}_f${i}${ext}`;
+      await maybeWriteImage(img, width, height, path);
     }
-    return crc32(img);
-  });
+    perFrame.push(crc32(img));
+  }
   if (snapshot && frameImages.length === 0) {
-    maybeWritePPM(image, width, height, snapshot);
+    await maybeWriteImage(image, width, height, snapshot);
   }
   const hash = crc32(image);
   console.log(JSON.stringify({
@@ -144,6 +164,7 @@ async function runSm64Demo(args: string[]) {
     crc32: hash,
     perFrameCRC32: perFrame,
     acks: res,
+    snapshot: snapshot || null,
   }, null, 2));
 }
 

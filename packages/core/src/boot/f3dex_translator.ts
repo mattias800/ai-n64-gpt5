@@ -45,7 +45,7 @@ export function translateF3DEXToUc(bus: Pick<Bus, 'loadU32'>, dlAddr: number, ma
     addr >>>= 0;
     const seg = (addr >>> 24) & 0x0F;
     const off = addr & 0x00FFFFFF;
-    const base = segBase[seg] >>> 0;
+    const base = (segBase[seg] ?? 0) >>> 0;
     if (base) return ((base & 0x00FFFFFF) + off) >>> 0;
     return addr >>> 0;
   }
