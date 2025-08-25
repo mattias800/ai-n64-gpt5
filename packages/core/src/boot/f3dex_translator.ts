@@ -221,16 +221,24 @@ export function translateF3DEXToUc(bus: Pick<Bus, 'loadU32'>, dlAddr: number, ma
         }
         break;
       }
-      case 0xBB: { // Mock: TRI2D_TEX_QZ - draw RGBA16 textured triangle with perspective-correct ST and Z
+      case 0xBB: { // Mock: TRI2D_TEX_QZ - draw textured triangle with perspective-correct ST (and optional Z)
         const i0 = (w0 >>> 0) & 0xF; const i1 = (w0 >>> 4) & 0xF; const i2 = (w0 >>> 8) & 0xF;
         const a = vtx[i0], b = vtx[i1], c = vtx[i2];
-        if (a && b && c && imgAddr != null && imgFmt === 'RGBA16') {
+        if (a && b && c && imgAddr != null) {
           const tw = tileW || 0; const th = tileH || 0;
-          out.push({ op: 'DrawRGBA16TriPerspZ', addr: imgAddr>>>0, texW: tw|0, texH: th|0,
-            x1: a.x|0, y1: a.y|0, s1: (a.s??0)|0, t1: (a.t??0)|0, q1: (a.q??1)>>>0, z1: (a.z??0)>>>0,
-            x2: b.x|0, y2: b.y|0, s2: (b.s??0)|0, t2: (b.t??0)|0, q2: (b.q??1)>>>0, z2: (b.z??0)>>>0,
-            x3: c.x|0, y3: c.y|0, s3: (c.s??0)|0, t3: (c.t??0)|0, q3: (c.q??1)>>>0, z3: (c.z??0)>>>0,
-          } as any);
+          if (imgFmt === 'RGBA16') {
+            out.push({ op: 'DrawRGBA16TriPerspZ', addr: imgAddr>>>0, texW: tw|0, texH: th|0,
+              x1: a.x|0, y1: a.y|0, s1: (a.s??0)|0, t1: (a.t??0)|0, q1: (a.q??1)>>>0, z1: (a.z??0)>>>0,
+              x2: b.x|0, y2: b.y|0, s2: (b.s??0)|0, t2: (b.t??0)|0, q2: (b.q??1)>>>0, z2: (b.z??0)>>>0,
+              x3: c.x|0, y3: c.y|0, s3: (c.s??0)|0, t3: (c.t??0)|0, q3: (c.q??1)>>>0, z3: (c.z??0)>>>0,
+            } as any);
+          } else if (imgFmt === 'CI8') {
+            out.push({ op: 'DrawCI8TriPersp', addr: imgAddr>>>0, texW: tw|0, texH: th|0,
+              x1: a.x|0, y1: a.y|0, s1: (a.s??0)|0, t1: (a.t??0)|0, q1: (a.q??1)>>>0,
+              x2: b.x|0, y2: b.y|0, s2: (b.s??0)|0, t2: (b.t??0)|0, q2: (b.q??1)>>>0,
+              x3: c.x|0, y3: c.y|0, s3: (c.s??0)|0, t3: (c.t??0)|0, q3: (c.q??1)>>>0,
+            } as any);
+          }
         }
         break;
       }
@@ -257,6 +265,11 @@ export function translateF3DEXToUc(bus: Pick<Bus, 'loadU32'>, dlAddr: number, ma
       case 0xEC: { // Mock: SET_Z_ENABLE
         const enable = (w1 & 1) !== 0;
         out.push({ op: 'SetZEnable', enable });
+        break;
+      }
+      case 0xEA: { // Mock: SET_TEX_FILTER (w1: 0=NEAREST,1=BILINEAR)
+        const bil = (w1 & 1) !== 0;
+        out.push({ op: 'SetTexFilter', mode: bil ? 'BILINEAR' : 'NEAREST' });
         break;
       }
       case 0xED: { // Mock: SET_Z_BUFFER (w0: width<<16 | height, w1: addr)
