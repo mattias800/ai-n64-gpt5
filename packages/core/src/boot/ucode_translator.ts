@@ -8,6 +8,7 @@ export type UcCmd =
   | { op: 'SetTexAddrMode'; sMode: 'CLAMP' | 'WRAP' | 'MIRROR'; tMode: 'CLAMP' | 'WRAP' | 'MIRROR' }
   | { op: 'SetTexFilter'; mode: 'NEAREST' | 'BILINEAR' }
   | { op: 'SetBlend'; enable: boolean }
+  | { op: 'SetBlendMode'; mode: 'OFF' | 'AVERAGE_50' | 'SRC_OVER_A1' }
   | { op: 'SetZEnable'; enable: boolean }
   | { op: 'SetZBuffer'; addr: number; width: number; height: number }
   | { op: 'ClearZ'; value: number }
@@ -69,6 +70,11 @@ export function ucToRspdlWords(cmds: UcCmd[], strideWords: number = 64): Uint32A
       }
       case 'SetBlend': {
         out.push(0x00000026, (c.enable ? 1 : 0) >>> 0);
+        break;
+      }
+      case 'SetBlendMode': {
+        const mode = c.mode === 'SRC_OVER_A1' ? 2 : c.mode === 'AVERAGE_50' ? 1 : 0;
+        out.push(0x00000027, mode >>> 0);
         break;
       }
       case 'SetZEnable': {

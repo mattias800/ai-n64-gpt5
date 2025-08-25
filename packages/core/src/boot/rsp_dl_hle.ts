@@ -57,8 +57,8 @@ function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number,
   let texTMode: 0 | 1 | 2 = 0;
   // 0=NEAREST, 1=BILINEAR
   let texFilter: 0 | 1 = 0;
-  // Blending state: when enabled, source-over averaging of 5-bit channels
-  let blendEnable: 0 | 1 = 0;
+  // Blending state: 0=OFF, 1=AVERAGE_50, 2=SRC_OVER_ALPHA_1BIT
+  let blendMode: 0 | 1 | 2 = 0;
   // Z-buffer state
   let zEnable: 0 | 1 = 0;
   let zAddr = 0 >>> 0;
@@ -76,6 +76,11 @@ function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number,
     const dr = (dst >>> 11) & 0x1f, dg = (dst >>> 6) & 0x1f, db = (dst >>> 1) & 0x1f, da = dst & 1;
     const r = (sr + dr) >> 1; const g = (sg + dg) >> 1; const b = (sb + db) >> 1; const a = sa | da;
     return (((r & 0x1f) << 11) | ((g & 0x1f) << 6) | ((b & 0x1f) << 1) | (a & 1)) >>> 0;
+  }
+  function applyBlend(dst: number, src: number): number {
+    if (blendMode === 1) return blendOver5551(dst, src);
+    if (blendMode === 2) return (src & 1) !== 0 ? (src >>> 0) : (dst >>> 0);
+    return src >>> 0;
   }
   while (wordsLeft > 0) {
     const op = bus.loadU32(addr) >>> 0; addr = (addr + 4) >>> 0; wordsLeft--;
@@ -188,10 +193,16 @@ function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number,
         texFilter = (m & 1) as 0|1;
         break;
       }
-      case 0x00000026: { // SET_BLEND: next 1 word: 0=disable,1=enable
+      case 0x00000026: { // SET_BLEND (legacy): next 1 word: 0=disable,1=enable
         if (wordsLeft < 1) return;
         const m = bus.loadU32(addr) >>> 0; addr = (addr + 4) >>> 0; wordsLeft -= 1;
-        blendEnable = (m & 1) as 0|1;
+        blendMode = ((m & 1) ? 1 : 0) as 0|1|2; // map to AVERAGE_50
+        break;
+      }
+      case 0x00000027: { // SET_BLEND_MODE: next 1 word: 0=OFF,1=AVERAGE_50,2=SRC_OVER_ALPHA_1BIT
+        if (wordsLeft < 1) return;
+        const m = bus.loadU32(addr) >>> 0; addr = (addr + 4) >>> 0; wordsLeft -= 1;
+        blendMode = (m === 2 ? 2 : m === 1 ? 1 : 0) as 0|1|2;
         break;
       }
       case 0x00000030: { // SET_PRIM_COLOR: next 1 word: RGBA5551
@@ -240,7 +251,7 @@ function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number,
                 const addrPix = origin + (y * stride + x) * 2;
                 if (addrPix + 1 < ram.length) {
                   let out = color >>> 0;
-                  if (blendEnable) { const dst = (((ram[addrPix] ?? 0) << 8) | (ram[addrPix+1] ?? 0)) >>> 0; out = blendOver5551(dst, out); }
+                  if (blendMode !== 0) { const dst = (((ram[addrPix] ?? 0) << 8) | (ram[addrPix+1] ?? 0)) >>> 0; out = applyBlend(dst, out); }
                   ram[addrPix] = (out >>> 8) & 0xff; ram[addrPix + 1] = out & 0xff;
                 }
               }
@@ -326,7 +337,7 @@ function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number,
                   const addrPix = origin + (y * stride + x) * 2;
                   if (addrPix + 1 < ram.length) {
                     let out = color >>> 0;
-                    if (blendEnable) { const dst = (((ram[addrPix] ?? 0) << 8) | (ram[addrPix+1] ?? 0)) >>> 0; out = blendOver5551(dst, out); }
+                    if (blendMode !== 0) { const dst = (((ram[addrPix] ?? 0) << 8) | (ram[addrPix+1] ?? 0)) >>> 0; out = applyBlend(dst, out); }
                     ram[addrPix] = (out >>> 8) & 0xff; ram[addrPix + 1] = out & 0xff;
                   }
                 }
@@ -420,7 +431,7 @@ function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number,
                   const addrPix = origin + (y * stride + x) * 2;
                   if (addrPix + 1 < ram.length) {
                     let out = color >>> 0;
-                    if (blendEnable) { const dst = (((ram[addrPix] ?? 0) << 8) | (ram[addrPix+1] ?? 0)) >>> 0; out = blendOver5551(dst, out); }
+                    if (blendMode !== 0) { const dst = (((ram[addrPix] ?? 0) << 8) | (ram[addrPix+1] ?? 0)) >>> 0; out = applyBlend(dst, out); }
                     ram[addrPix] = (out >>> 8) & 0xff; ram[addrPix + 1] = out & 0xff;
                   }
                 }
@@ -568,12 +579,12 @@ function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number,
                   const i0=i00+(i10-i00)*a, i1=i01+(i11-i01)*a; const iv=Math.round(i0+(i1-i0)*b)&0x1f;
                   const a0v=a00+(a10-a00)*a, a1v=a01+(a11-a01)*a; const av=(Math.round(a0v+(a1v-a0v)*b)&1);
                   const color=((iv<<11)|(iv<<6)|(iv<<1)|av)>>>0;
-                  const p=origin+(y*stride+x)*2; if(p+1<ram.length){ let out=color>>>0; if(blendEnable){ const dst=(((ram[p]??0)<<8)|(ram[p+1]??0))>>>0; out=blendOver5551(dst,out);} ram[p]=(out>>>8)&0xff; ram[p+1]=out&0xff; }
+                  const p=origin+(y*stride+x)*2; if(p+1<ram.length){ let out=color>>>0; if(blendMode!==0){ const dst=(((ram[p]??0)<<8)|(ram[p+1]??0))>>>0; out=applyBlend(dst,out);} ram[p]=(out>>>8)&0xff; ram[p+1]=out&0xff; }
                 } else {
                   const ss = nearestIndex(s, texW, texSMode); const tt = nearestIndex(t, texH, texTMode); const bv=ram[texAddr+(tt*texW+ss)]??0;
                   const i5=to5((bv>>>4)&0xF,4); const a1=(bv&0xF)>=8?1:0;
                   const color=((i5<<11)|(i5<<6)|(i5<<1)|a1)>>>0;
-                  const p=origin+(y*stride+x)*2; if(p+1<ram.length){ let out=color>>>0; if(blendEnable){ const dst=(((ram[p]??0)<<8)|(ram[p+1]??0))>>>0; out=blendOver5551(dst,out);} ram[p]=(out>>>8)&0xff; ram[p+1]=out&0xff; }
+                  const p=origin+(y*stride+x)*2; if(p+1<ram.length){ let out=color>>>0; if(blendMode!==0){ const dst=(((ram[p]??0)<<8)|(ram[p+1]??0))>>>0; out=applyBlend(dst,out);} ram[p]=(out>>>8)&0xff; ram[p+1]=out&0xff; }
                 }
               }
             }
@@ -641,10 +652,10 @@ function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number,
                   const a00=p00.A>=128?1:0, a10=p10.A>=128?1:0, a01=p01.A>=128?1:0, a11=p11.A>=128?1:0;
                   const i0=i00+(i10-i00)*a, i1=i01+(i11-i01)*a; const iv=Math.round(i0+(i1-i0)*b)&0x1f; const a0v=a00+(a10-a00)*a, a1v=a01+(a11-a01)*a; const av=(Math.round(a0v+(a1v-a0v)*b)&1);
                   const color=((iv<<11)|(iv<<6)|(iv<<1)|av)>>>0;
-                  const p=origin+(y*stride+x)*2; if(p+1<ram.length){ let out=color>>>0; if(blendEnable){ const dst=(((ram[p]??0)<<8)|(ram[p+1]??0))>>>0; out=blendOver5551(dst,out);} ram[p]=(out>>>8)&0xff; ram[p+1]=out&0xff; }
+                  const p=origin+(y*stride+x)*2; if(p+1<ram.length){ let out=color>>>0; if(blendMode!==0){ const dst=(((ram[p]??0)<<8)|(ram[p+1]??0))>>>0; out=applyBlend(dst,out);} ram[p]=(out>>>8)&0xff; ram[p+1]=out&0xff; }
                 } else {
                   const ss = nearestIndex(s, texW, texSMode); const tt = nearestIndex(t, texH, texTMode); const idx=tt*texW+ss; const I=ram[texAddr+idx*2]??0; const A=ram[texAddr+idx*2+1]??0; const i5=to5(I); const a1=A>=128?1:0; const color=((i5<<11)|(i5<<6)|(i5<<1)|a1)>>>0;
-                  const p=origin+(y*stride+x)*2; if(p+1<ram.length){ let out=color>>>0; if(blendEnable){ const dst=(((ram[p]??0)<<8)|(ram[p+1]??0))>>>0; out=blendOver5551(dst,out);} ram[p]=(out>>>8)&0xff; ram[p+1]=out&0xff; }
+                  const p=origin+(y*stride+x)*2; if(p+1<ram.length){ let out=color>>>0; if(blendMode!==0){ const dst=(((ram[p]??0)<<8)|(ram[p+1]??0))>>>0; out=applyBlend(dst,out);} ram[p]=(out>>>8)&0xff; ram[p+1]=out&0xff; }
                 }
               }
             }
@@ -717,10 +728,10 @@ function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number,
                   const b0=b00+(b10-b00)*a, b1=b01+(b11-b01)*a; const B=Math.round(b0+(b1-b0)*b)&0x1f;
                   const a0v=a00+(a10-a00)*a; const a1v=a01+(a11-a01)*a; const A=(Math.round(a0v+(a1v-a0v)*b)&1);
                   const color=((R<<11)|(G<<6)|(B<<1)|A)>>>0;
-                  const p=origin+(y*stride+x)*2; if(p+1<ram.length){ let out=color>>>0; if(blendEnable){ const dst=(((ram[p]??0)<<8)|(ram[p+1]??0))>>>0; out=blendOver5551(dst,out);} ram[p]=(out>>>8)&0xff; ram[p+1]=out&0xff; }
+                  const p=origin+(y*stride+x)*2; if(p+1<ram.length){ let out=color>>>0; if(blendMode!==0){ const dst=(((ram[p]??0)<<8)|(ram[p+1]??0))>>>0; out=applyBlend(dst,out);} ram[p]=(out>>>8)&0xff; ram[p+1]=out&0xff; }
                 } else {
                   const ss = nearestIndex(s, texW, texSMode); const tt = nearestIndex(t, texH, texTMode); const idx=tt*texW+ss; const ptx=(texAddr+idx*2)>>>0; const hi=ram[ptx]??0; const lo=ram[ptx+1]??0; const color=((hi<<8)|lo)>>>0;
-                  const d=origin+(y*stride+x)*2; if(d+1<ram.length){ let out=color>>>0; if(blendEnable){ const dst=(((ram[d]??0)<<8)|(ram[d+1]??0))>>>0; out=blendOver5551(dst,out);} ram[d]=(out>>>8)&0xff; ram[d+1]=out&0xff; }
+                  const d=origin+(y*stride+x)*2; if(d+1<ram.length){ let out=color>>>0; if(blendMode!==0){ const dst=(((ram[d]??0)<<8)|(ram[d+1]??0))>>>0; out=applyBlend(dst,out);} ram[d]=(out>>>8)&0xff; ram[d+1]=out&0xff; }
                 }
               }
             }
@@ -845,7 +856,7 @@ function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number,
                 const addrPix = origin + (y * stride + x) * 2;
                 if (addrPix + 1 < ram.length) {
                   let out = color >>> 0;
-                  if (blendEnable) { const dst = (((ram[addrPix] ?? 0) << 8) | (ram[addrPix+1] ?? 0)) >>> 0; out = blendOver5551(dst, out); }
+                  if (blendMode !== 0) { const dst = (((ram[addrPix] ?? 0) << 8) | (ram[addrPix+1] ?? 0)) >>> 0; out = applyBlend(dst, out); }
                   ram[addrPix] = (out >>> 8) & 0xff; ram[addrPix + 1] = out & 0xff;
                 }
               }
@@ -899,7 +910,7 @@ function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number,
               } else {
                 const ss = nearestIndex(s, texW, texSMode); const tt = nearestIndex(t, texH, texTMode); const idx=tt*texW+ss; const p=(texAddr+idx*2)>>>0; const hi=ram[p]??0; const lo=ram[p+1]??0; color=((hi<<8)|lo)>>>0;
               }
-              const dp=origin+(y*stride+x)*2; if(dp+1<ram.length){ let out=color>>>0; if(blendEnable){ const dst=(((ram[dp]??0)<<8)|(ram[dp+1]??0))>>>0; out=blendOver5551(dst,out);} ram[dp]=(out>>>8)&0xff; ram[dp+1]=out&0xff; }
+              const dp=origin+(y*stride+x)*2; if(dp+1<ram.length){ let out=color>>>0; if(blendMode!==0){ const dst=(((ram[dp]??0)<<8)|(ram[dp+1]??0))>>>0; out=applyBlend(dst,out);} ram[dp]=(out>>>8)&0xff; ram[dp+1]=out&0xff; }
             }
           }
         }
@@ -951,7 +962,7 @@ function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number,
               } else {
                 const ss = nearestIndex(sF, texW, texSMode); const tt = nearestIndex(tF, texH, texTMode); const idx=tt*texW+ss; const p=(texAddr+idx*2)>>>0; const hi=ram[p]??0; const lo=ram[p+1]??0; color=((hi<<8)|lo)>>>0;
               }
-              const dp=origin+(y*stride+x)*2; if(dp+1<ram.length){ let out=color>>>0; if(blendEnable){ const dst=(((ram[dp]??0)<<8)|(ram[dp+1]??0))>>>0; out=blendOver5551(dst,out);} ram[dp]=(out>>>8)&0xff; ram[dp+1]=out&0xff; }
+              const dp=origin+(y*stride+x)*2; if(dp+1<ram.length){ let out=color>>>0; if(blendMode!==0){ const dst=(((ram[dp]??0)<<8)|(ram[dp+1]??0))>>>0; out=applyBlend(dst,out);} ram[dp]=(out>>>8)&0xff; ram[dp+1]=out&0xff; }
             }
           }
         }
