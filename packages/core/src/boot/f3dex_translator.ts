@@ -51,6 +51,8 @@ export function translateF3DEXToUc(bus: Pick<Bus, 'loadU32'>, dlAddr: number, ma
   }
 
   let cmds = 0;
+  // Track a simple scissor rectangle; translate to SetScissor UC when changed.
+  let scissor: { x0: number, y0: number, x1: number, y1: number } | null = null;
   while (cmds < maxCmds) {
     const w0 = bus.loadU32(p) >>> 0; p = (p + 4) >>> 0;
     const w1 = bus.loadU32(p) >>> 0; p = (p + 4) >>> 0;
@@ -83,6 +85,19 @@ export function translateF3DEXToUc(bus: Pick<Bus, 'loadU32'>, dlAddr: number, ma
         // Convert 10.2 fixed: pixel size is lr-ul+[+1] per HW; we follow our typed translator heuristic
         tileW = Math.max(0, Math.floor((lrx - ulx) / 4 + 1));
         tileH = Math.max(0, Math.floor((lry - uly) / 4 + 1));
+        break;
+      }
+      case 0xE3: { // Mock: G_SCISSOR - parse ulx/uly and lrx/lry in 10.2 fixed like TEXRECT
+        const ulx = (w0 >>> 12) & 0xFFF;
+        const uly = (w0 >>> 0) & 0xFFF;
+        const lrx = (w1 >>> 12) & 0xFFF;
+        const lry = (w1 >>> 0) & 0xFFF;
+        const x0 = fp10_2_to_px(ulx);
+        const y0 = fp10_2_to_px(uly);
+        const x1 = fp10_2_to_px(lrx);
+        const y1 = fp10_2_to_px(lry);
+        scissor = { x0, y0, x1, y1 };
+        out.push({ op: 'SetScissor', x0, y0, x1, y1 });
         break;
       }
       case 0xE4: { // G_TEXRECT

@@ -64,6 +64,8 @@ function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number,
   let zAddr = 0 >>> 0;
   let zWidth = 0 >>> 0;
   let zHeight = 0 >>> 0;
+  // Scissor rectangle (inclusive x0,y0 to exclusive x1,y1)
+  let scX0 = 0, scY0 = 0, scX1 = width|0, scY1 = height|0;
   const bytes = bus.rdram.bytes;
   function readU16BE(p: number): number {
     const hi = bytes[p] ?? 0; const lo = bytes[p+1] ?? 0; return ((hi << 8) | lo) >>> 0;
@@ -205,6 +207,20 @@ function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number,
         blendMode = (m === 2 ? 2 : m === 1 ? 1 : 0) as 0|1|2;
         break;
       }
+      case 0x00000028: { // SET_SCISSOR: next 4 words: x0,y0,x1,y1 (inclusive x0,y0; exclusive x1,y1)
+        if (wordsLeft < 4) return;
+        scX0 = bus.loadU32(addr)|0; addr=(addr+4)>>>0;
+        scY0 = bus.loadU32(addr)|0; addr=(addr+4)>>>0;
+        scX1 = bus.loadU32(addr)|0; addr=(addr+4)>>>0;
+        scY1 = bus.loadU32(addr)|0; addr=(addr+4)>>>0;
+        wordsLeft -= 4;
+        // Clamp to framebuffer bounds
+        scX0 = Math.max(0, Math.min(scX0, width));
+        scY0 = Math.max(0, Math.min(scY0, height));
+        scX1 = Math.max(scX0, Math.min(scX1, width));
+        scY1 = Math.max(scY0, Math.min(scY1, height));
+        break;
+      }
       case 0x00000030: { // SET_PRIM_COLOR: next 1 word: RGBA5551
         if (wordsLeft < 1) return;
         primColor = bus.loadU32(addr) >>> 0; addr = (addr + 4) >>> 0; wordsLeft -= 1;
@@ -249,7 +265,8 @@ function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number,
             const w2 = edge(x1,y1,x2,y2,x,y) * wsign;
               if (w0 >= 0 && w1 >= 0 && w2 >= 0) {
                 const addrPix = origin + (y * stride + x) * 2;
-                if (addrPix + 1 < ram.length) {
+                if (x < scX0 || x >= scX1 || y < scY0 || y >= scY1) { /* clipped */ }
+                else if (addrPix + 1 < ram.length) {
                   let out = color >>> 0;
                   if (blendMode !== 0) { const dst = (((ram[addrPix] ?? 0) << 8) | (ram[addrPix+1] ?? 0)) >>> 0; out = applyBlend(dst, out); }
                   ram[addrPix] = (out >>> 8) & 0xff; ram[addrPix + 1] = out & 0xff;
@@ -287,7 +304,8 @@ function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number,
               const w2 = edge(x1,y1,x2,y2,x,y) * wsign;
               if (w0 >= 0 && w1 >= 0 && w2 >= 0) {
                 const addrPix = origin + (y * stride + x) * 2;
-                if (addrPix + 1 < ram.length) { ram[addrPix] = (solid >>> 8) & 0xff; ram[addrPix + 1] = solid & 0xff; }
+                if (x < scX0 || x >= scX1 || y < scY0 || y >= scY1) { /* clipped */ }
+                else if (addrPix + 1 < ram.length) { ram[addrPix] = (solid >>> 8) & 0xff; ram[addrPix + 1] = solid & 0xff; }
               }
             }
           }
@@ -335,7 +353,8 @@ function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number,
                 const color = outColor !== null ? (outColor >>> 0) : tlut[idx!] >>> 0;
                 if ((color & 1) !== 0) {
                   const addrPix = origin + (y * stride + x) * 2;
-                  if (addrPix + 1 < ram.length) {
+                  if (x < scX0 || x >= scX1 || y < scY0 || y >= scY1) { /* clipped */ }
+                  else if (addrPix + 1 < ram.length) {
                     let out = color >>> 0;
                     if (blendMode !== 0) { const dst = (((ram[addrPix] ?? 0) << 8) | (ram[addrPix+1] ?? 0)) >>> 0; out = applyBlend(dst, out); }
                     ram[addrPix] = (out >>> 8) & 0xff; ram[addrPix + 1] = out & 0xff;
@@ -375,7 +394,8 @@ function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number,
               const w2 = edge(x1,y1,x2,y2,x,y) * wsign;
               if (w0 >= 0 && w1 >= 0 && w2 >= 0) {
                 const addrPix = origin + (y * stride + x) * 2;
-                if (addrPix + 1 < ram.length) { ram[addrPix] = (solid >>> 8) & 0xff; ram[addrPix + 1] = solid & 0xff; }
+                if (x < scX0 || x >= scX1 || y < scY0 || y >= scY1) { /* clipped */ }
+                else if (addrPix + 1 < ram.length) { ram[addrPix] = (solid >>> 8) & 0xff; ram[addrPix + 1] = solid & 0xff; }
               }
             }
           }
@@ -429,7 +449,8 @@ function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number,
                 }
                 if ((color & 1) !== 0) {
                   const addrPix = origin + (y * stride + x) * 2;
-                  if (addrPix + 1 < ram.length) {
+                  if (x < scX0 || x >= scX1 || y < scY0 || y >= scY1) { /* clipped */ }
+                  else if (addrPix + 1 < ram.length) {
                     let out = color >>> 0;
                     if (blendMode !== 0) { const dst = (((ram[addrPix] ?? 0) << 8) | (ram[addrPix+1] ?? 0)) >>> 0; out = applyBlend(dst, out); }
                     ram[addrPix] = (out >>> 8) & 0xff; ram[addrPix + 1] = out & 0xff;
@@ -488,7 +509,7 @@ function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number,
                   idx = (ram[texAddr + (tt*texW + ss)] ?? 0) >>> 0;
                 }
                 const color = outColor !== null ? (outColor >>> 0) : tlut[idx!]>>>0;
-                if((color&1)!==0){ const p=origin+(y*stride+x)*2; if(p+1<ram.length){ ram[p]=(color>>>8)&0xff; ram[p+1]=color&0xff; } }
+                if((color&1)!==0){ const p=origin+(y*stride+x)*2; if (x < scX0 || x >= scX1 || y < scY0 || y >= scY1) { /* clipped */ } else if(p+1<ram.length){ ram[p]=(color>>>8)&0xff; ram[p+1]=color&0xff; } }
               }
             }
           }
