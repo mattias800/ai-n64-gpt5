@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { Bus, RDRAM, CPU, System, runSM64TitleDemoDP, runSM64TitleDemoSPDP, writeSM64TitleTasksToRDRAM, scheduleSPTitleTasksFromRDRAMAndRun, writeRSPTitleDLsToRDRAM, scheduleRSPDLFramesAndRun, writeUcAsRspdl, f3dToUc, scheduleRSPDLFromTableAndRun, scheduleF3DEXFromTableAndRun, hlePiLoadSegments, decompressMIO0 } from '@n64/core';
+import { Bus, RDRAM, CPU, System, runSM64TitleDemoDP, runSM64TitleDemoSPDP, writeSM64TitleTasksToRDRAM, scheduleSPTitleTasksFromRDRAMAndRun, writeRSPTitleDLsToRDRAM, scheduleRSPDLFramesAndRun, writeUcAsRspdl, f3dToUc, scheduleRSPDLFromTableAndRun, scheduleF3DEXFromTableAndRun, hlePiLoadSegments, decompressMIO0, viScanout } from '@n64/core';
 
 function parseNum(val: string | undefined, def: number): number {
   if (val === undefined) return def;
@@ -71,15 +71,17 @@ function printUsage() {
   n64-headless f3d-run <config.json> [--snapshot path.png]
   n64-headless f3d-run-table <config.json> [--snapshot path.png]
   n64-headless f3dex-run-table <config.json> [--snapshot path.png]
-  n64-headless f3dex-rom-run <config.json> [--snapshot path.png]
-  n64-headless sm64-rom-title <config.json> [--snapshot path.png]
-
-Examples:
-  n64-headless sm64-demo --frames 1
-  n64-headless sm64-demo --frames 2 --snapshot tmp/sm64_2f.ppm
-  n64-headless f3dex-rom-run tmp/rom_demo.json --snapshot tmp/rom.png
-`);
-}
+   n64-headless f3dex-rom-run <config.json> [--snapshot path.png]
+   n64-headless sm64-rom-title <config.json> [--snapshot path.png]
+   n64-headless rom-boot-run <rom.z64> [--cycles N] [--vi-interval CYC] [--width W] [--height H] [--snapshot path.png]
+ 
+ Examples:
+   n64-headless sm64-demo --frames 1
+   n64-headless sm64-demo --frames 2 --snapshot tmp/sm64_2f.ppm
+   n64-headless f3dex-rom-run tmp/rom_demo.json --snapshot tmp/rom.png
+   n64-headless rom-boot-run mario64.z64 --cycles 5000000 --vi-interval 10000 --width 320 --height 240 --snapshot tmp/boot/boot.png
+ `);
+ }
 
 async function runSm64Demo(args: string[]) {
   const opts: Record<string, string> = {};
@@ -821,7 +823,15 @@ async function runSm64RomTitle(args: string[]) {
   }
 
   const total = start + interval * frames + 2;
-  const { image, frames: imgs, res } = scheduleF3DEXFromTableAndRun(cpu, bus, sys, origin, width, height, tableBase, frames, stagingBase, strideWords, start, interval, total, spOffset);
+  // If bg is provided, pass it through so the renderer composes a gradient even when there are no tiles.
+  const bgStart = cfg.bg ? num(cfg.bg.start5551) : undefined;
+  const bgEnd = cfg.bg ? num(cfg.bg.end5551) : undefined;
+  const { image, frames: imgs, res } = scheduleF3DEXFromTableAndRun(
+    cpu, bus, sys, origin, width, height,
+    tableBase, frames, stagingBase, strideWords,
+    start, interval, total, spOffset,
+    bgStart, bgEnd,
+  );
   const perFrame: string[] = [];
   for (let i = 0; i < imgs.length; i++) {
     if (snapshot) {
@@ -834,6 +844,318 @@ async function runSm64RomTitle(args: string[]) {
     perFrame.push(crc32(imgs[i]!));
   }
   console.log(JSON.stringify({ command: 'sm64-rom-title', cfg: { width, height, origin, start, interval, frames, spOffset }, perFrameCRC32: perFrame, crc32: crc32(image), acks: res, snapshot: snapshot||null }, null, 2));
+}
+
+async function runRomBootRun(args: string[]) {
+  // Arguments: <rom> [--cycles N] [--vi-interval CYC] [--width W] [--height H] [--snapshot path.png] [--discover] [--boot path.json] [--boot-out path.json]
+  const file = args.find(a => !a.startsWith('--'));
+  if (!file) { console.error('rom-boot-run requires a ROM file path'); process.exit(1); }
+  const opts: Record<string, string> = {};
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a.startsWith('--')) {
+      const key = a.slice(2);
+      const next = (i + 1 < args.length) ? args[i + 1] : undefined;
+      const val = (next && !next.startsWith('--')) ? args[++i]! : '1';
+      opts[key] = val;
+    }
+  }
+  const cycles = parseNum(opts['cycles'], 5_000_000);
+  const viInterval = parseNum(opts['vi-interval'], 10000);
+  const width = parseNum(opts['width'], 320);
+  const height = parseNum(opts['height'], 240);
+  const snapshot = opts['snapshot'];
+  const discover = Object.prototype.hasOwnProperty.call(opts, 'discover');
+  const bootPath = opts['boot'];
+  const bootOut = opts['boot-out'];
+
+  const fs = await import('node:fs');
+  const rom = fs.readFileSync(file);
+
+  // Bigger RDRAM so KSEG0 physical addresses are in range
+  const rdram = new RDRAM(8 * 1024 * 1024);
+  const bus = new Bus(rdram);
+  const cpu = new CPU(bus);
+  const sys = new System(cpu, bus);
+
+  // Utility to hex-encode a byte array
+  const toHex = (arr: Uint8Array) => Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
+  const be32 = (arr: Uint8Array, off: number) => (((arr[off]! << 24) | (arr[off+1]! << 16) | (arr[off+2]! << 8) | (arr[off+3]!)) >>> 0);
+
+  // HLE boot sets PC from header and makes ROM available to PI
+  const { hleBoot, hlePiLoadSegments } = await import('@n64/core');
+  const boot = hleBoot(cpu, bus, new Uint8Array(rom));
+
+  // Heuristic pre-stage when discovering and no boot script provided:
+  if (!bootPath && discover) {
+    const basePhys = (boot.initialPC >>> 0) - 0x80000000 >>> 0;
+    const guessLen = Math.min((rom.length >>> 0), 2 * 1024 * 1024);
+    if (basePhys + guessLen <= bus.rdram.bytes.length) {
+      // Copy a large slice from ROM start to the entrypoint region
+      hlePiLoadSegments(bus as any, [ { cartAddr: 0 >>> 0, dramAddr: basePhys >>> 0, length: guessLen >>> 0 } ], true);
+    }
+  }
+
+  // If a boot script is provided, stage its PI loads before stepping
+  if (bootPath) {
+    try {
+      const bootText = await (await import('node:fs')).promises.readFile(bootPath, 'utf8');
+      const bootCfg = JSON.parse(bootText);
+      const toNum = (v: any) => (typeof v === 'number' ? v>>>0 : (typeof v === 'string' ? parseNum(v, 0) : 0)) >>> 0;
+      if (Array.isArray(bootCfg.piLoads)) {
+        const segs = bootCfg.piLoads.map((s: any) => ({ cartAddr: toNum(s.cartAddr), dramAddr: toNum(s.dramAddr), length: toNum(s.length) }));
+        hlePiLoadSegments(bus, segs, true);
+      }
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error(`Failed to read --boot file ${bootPath}:`, e);
+    }
+  }
+
+  // Instrumentation: track SP starts and PI reads, and VI changes
+  let spStarts = 0;
+  let piReads = 0;
+  let viOrigin = bus.vi.origin >>> 0;
+  let viWidth = bus.vi.width >>> 0;
+  let lastPiDram = 0 >>> 0;
+  let lastPiCart = 0 >>> 0;
+  const piLoads: { cartAddr: number; dramAddr: number; length: number }[] = [];
+
+  // Track SP DMA and OSTask-like snapshots
+  let spMemAddr = 0 >>> 0;
+  let spDramAddr = 0 >>> 0;
+  const spDmas: { op: 'RD'|'WR'; memAddr: number; dramAddr: number; length: number }[] = [];
+  const ostasks: { index: number; memAddr: number; dmas: { op: string; memAddr: string; dramAddr: string; length: string }[]; dmemFirst256Hex: string; task?: any }[] = [];
+
+  const spWrite = bus.sp.writeU32.bind(bus.sp) as (off: number, val: number) => void;
+  (bus.sp as any).writeU32 = (off: number, val: number) => {
+    const o = off >>> 0; const v = val >>> 0;
+    if (o === 0x00) {
+      if ((v & 0x1) !== 0 && v === 1) {
+        spStarts++;
+        // Snapshot a small view of DMEM at start
+        const dmemSlice = (bus.sp as any).dmem as Uint8Array;
+        // Try to parse a plausible OSTask struct at DMEM[0..63]
+        let task: any | undefined = undefined;
+        try {
+          const tOff = 0;
+          const type = be32(dmemSlice, tOff + 0x00);
+          const flags = be32(dmemSlice, tOff + 0x04);
+          const ucode_boot = be32(dmemSlice, tOff + 0x08);
+          const ucode_boot_size = be32(dmemSlice, tOff + 0x0C);
+          const ucode = be32(dmemSlice, tOff + 0x10);
+          const ucode_size = be32(dmemSlice, tOff + 0x14);
+          const ucode_data = be32(dmemSlice, tOff + 0x18);
+          const ucode_data_size = be32(dmemSlice, tOff + 0x1C);
+          const dram_stack = be32(dmemSlice, tOff + 0x20);
+          const dram_stack_size = be32(dmemSlice, tOff + 0x24);
+          const output_buff = be32(dmemSlice, tOff + 0x28);
+          const output_buff_size = be32(dmemSlice, tOff + 0x2C);
+          const data_ptr = be32(dmemSlice, tOff + 0x30);
+          const data_size = be32(dmemSlice, tOff + 0x34);
+          const yield_data_ptr = be32(dmemSlice, tOff + 0x38);
+          const yield_data_size = be32(dmemSlice, tOff + 0x3C);
+          // Only include if fields look non-zero reasonably
+          const fields = { type, flags, ucode_boot, ucode_boot_size, ucode, ucode_size, ucode_data, ucode_data_size, dram_stack, dram_stack_size, output_buff, output_buff_size, data_ptr, data_size, yield_data_ptr, yield_data_size } as const;
+          const anyNonZero = Object.values(fields).some(v => (v >>> 0) !== 0);
+          if (anyNonZero) {
+            task = Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, `0x${(v>>>0).toString(16)}`]));
+          }
+        } catch {}
+        const snap = {
+          index: spStarts >>> 0,
+          memAddr: spMemAddr >>> 0,
+          dmas: spDmas.slice(-8).map(d => ({
+            op: d.op,
+            memAddr: `0x${(d.memAddr>>>0).toString(16)}`,
+            dramAddr: `0x${(d.dramAddr>>>0).toString(16)}`,
+            length: `0x${(d.length>>>0).toString(16)}`,
+          })),
+          dmemFirst256Hex: toHex(dmemSlice.slice(0, 256)),
+          task,
+        };
+        ostasks.push(snap);
+      } else {
+        spMemAddr = v >>> 0;
+      }
+    } else if (o === 0x04) {
+      spDramAddr = v >>> 0;
+    } else if (o === 0x08) { // SP_RD_LEN
+      const len = ((v & 0x00ffffff) >>> 0) + 1;
+      spDmas.push({ op: 'RD', memAddr: spMemAddr >>> 0, dramAddr: spDramAddr >>> 0, length: len >>> 0 });
+    } else if (o === 0x0C) { // SP_WR_LEN
+      const len = ((v & 0x00ffffff) >>> 0) + 1;
+      spDmas.push({ op: 'WR', memAddr: spMemAddr >>> 0, dramAddr: spDramAddr >>> 0, length: len >>> 0 });
+    }
+    spWrite(o, v);
+  };
+  const piWrite = bus.pi.writeU32.bind(bus.pi) as (off: number, val: number) => void;
+  (bus.pi as any).writeU32 = (off: number, val: number) => {
+    const offU = off >>> 0;
+    const valU = val >>> 0;
+    if (offU === 0x00) lastPiDram = valU >>> 0; // PI_DRAM_ADDR
+    if (offU === 0x04) lastPiCart = valU >>> 0; // PI_CART_ADDR
+    if (offU === 0x08) { // PI_RD_LEN
+      piReads++;
+      const len = ((valU & 0x00ffffff) >>> 0) + 1;
+      piLoads.push({ cartAddr: lastPiCart >>> 0, dramAddr: lastPiDram >>> 0, length: len >>> 0 });
+    }
+    piWrite(offU, valU);
+  };
+  const viWrite = bus.vi.writeU32.bind(bus.vi) as (off: number, val: number) => void;
+  (bus.vi as any).writeU32 = (off: number, val: number) => {
+    viWrite(off, val >>> 0);
+    // Mirror public fields for convenience
+    if ((off >>> 0) === 0x14) viOrigin = val >>> 0; // VI_ORIGIN_OFF
+    if ((off >>> 0) === 0x18) viWidth = val >>> 0;  // VI_WIDTH_OFF
+  };
+
+  // Schedule periodic VI vblank and snapshot if configured
+  const frames: Uint8Array[] = [];
+  sys.scheduleEvery(viInterval >>> 0, viInterval >>> 0, Math.max(1, Math.floor(cycles / Math.max(1, viInterval))), () => {
+    bus.vi.vblank();
+    if (snapshot && viOrigin !== 0 && viWidth !== 0) {
+      const img = viScanout(bus, width, height);
+      frames.push(img);
+    }
+  });
+
+  // Step CPU for requested cycles; trap errors to report gracefully
+  let stopReason: string | null = null;
+  try {
+    sys.stepCycles(cycles);
+  } catch (e: any) {
+    stopReason = String(e?.message || e);
+  }
+
+  // If discovering and no PI activity, try multi-window heuristic reattempts
+  if (discover && piLoads.length === 0) {
+    const { hleBoot: hleBoot2, hlePiLoadSegments: hlePi2 } = await import('@n64/core');
+
+    // Pass 1: doubling windows (coarse)
+    const coarseStarts: number[] = [];
+    for (let off = 0; off < Math.min(4 * 1024 * 1024, rom.length); off = off ? (off << 1) : 0x1000) coarseStarts.push(off >>> 0);
+    const runPass = async (starts: number[], perWindow: number): Promise<boolean> => {
+      for (const cartStart of starts) {
+        const rdram2 = new RDRAM(8 * 1024 * 1024);
+        const bus2 = new Bus(rdram2);
+        const cpu2 = new CPU(bus2);
+        const sys2 = new System(cpu2, bus2);
+        const boot2 = hleBoot2(cpu2, bus2, new Uint8Array(rom));
+        const basePhys2 = (boot2.initialPC >>> 0) - 0x80000000 >>> 0;
+        const len2 = Math.min(2 * 1024 * 1024, Math.max(0, rom.length - cartStart));
+        if (len2 <= 0 || basePhys2 + len2 > bus2.rdram.bytes.length) continue;
+        hlePi2(bus2 as any, [ { cartAddr: cartStart >>> 0, dramAddr: basePhys2 >>> 0, length: len2 >>> 0 } ], true);
+        let lastD = 0 >>> 0, lastC = 0 >>> 0;
+        const piLoadsTemp: { cartAddr: number; dramAddr: number; length: number }[] = [];
+        const piWrite2 = bus2.pi.writeU32.bind(bus2.pi) as (off: number, val: number) => void;
+        (bus2.pi as any).writeU32 = (off: number, val: number) => {
+          const o = off >>> 0, v = val >>> 0;
+          if (o === 0x00) lastD = v; if (o === 0x04) lastC = v;
+          if (o === 0x08) { const l = ((v & 0x00ffffff) >>> 0) + 1; piLoadsTemp.push({ cartAddr: lastC >>> 0, dramAddr: lastD >>> 0, length: l >>> 0 }); }
+          piWrite2(o, v);
+        };
+        let stop2: string | null = null;
+        try { sys2.stepCycles(perWindow); } catch (e: any) { stop2 = String(e?.message || e); }
+        if (piLoadsTemp.length > 0) {
+          for (const s of piLoadsTemp) piLoads.push(s);
+          stopReason = stop2;
+          console.log(`[discover] found PI loads with cartStart=0x${cartStart.toString(16)} after ${perWindow} cycles`);
+          return true;
+        }
+      }
+      return false;
+    };
+
+    const coarseCycles = Math.max(50000, Math.floor(cycles / Math.max(10, coarseStarts.length)));
+    const coarseHit = await runPass(coarseStarts, coarseCycles);
+
+    // Pass 2: linear windows (finer)
+    if (!coarseHit && piLoads.length === 0) {
+      const maxSpan = Math.min(8 * 1024 * 1024, rom.length);
+      const fineStarts: number[] = [];
+      for (let off = 0; off < maxSpan; off += 0x1000) fineStarts.push(off >>> 0);
+      const fineCycles = Math.max(20000, Math.floor(cycles / Math.max(20, fineStarts.length)));
+      await runPass(fineStarts, fineCycles);
+    }
+  }
+
+  // If we parsed any OSTask with a plausible data_ptr, attempt an HLE F3DEX bridge to render one frame
+  let bridgeCRC32: string | null = null;
+  let bridgeSnapshotPath: string | null = null;
+  try {
+    const last = [...ostasks].reverse().find(t => t.task && typeof t.task.data_ptr === 'string');
+    if (last && last.task) {
+      const ptrHex: string = last.task.data_ptr;
+      const dlPtr = parseNum(ptrHex, 0) >>> 0;
+      if (dlPtr >>> 0) {
+        // Build a 1-entry table pointing to the DL and run scheduleF3DEXFromTableAndRun for one frame
+        const fbBytes = (width * height * 2) >>> 0;
+        const fbOrigin = (viOrigin >>> 0) || 0xF000;
+        const tableBase = (fbOrigin + fbBytes + 0x20000) >>> 0;
+        const stagingBase = (tableBase + 0x4000) >>> 0;
+        const strideWords = 0x400 >>> 2;
+        bus.storeU32(tableBase, dlPtr >>> 0);
+        const start = 2, interval = 3;
+        const total = start + interval * 1 + 2;
+        const { image: bridgeImg } = scheduleF3DEXFromTableAndRun(
+          cpu, bus, sys, fbOrigin, width, height,
+          tableBase, 1, stagingBase, strideWords,
+          start, interval, total, 1,
+        );
+        bridgeCRC32 = crc32(bridgeImg);
+        if (snapshot) {
+          const extMatch = snapshot.match(/\.(png|ppm)$/i);
+          const ext = extMatch ? extMatch[0] : '.png';
+          const basePath = snapshot.replace(/\.(png|ppm)$/i, '');
+          bridgeSnapshotPath = `${basePath}_bridge${ext}`;
+          await maybeWriteImage(bridgeImg, width, height, bridgeSnapshotPath);
+        }
+      }
+    }
+  } catch {}
+
+  // Write snapshots if requested
+  if (snapshot) {
+    for (let i = 0; i < frames.length; i++) {
+      const extMatch = snapshot.match(/\.(png|ppm)$/i);
+      const ext = extMatch ? extMatch[0] : '.png';
+      const basePath = snapshot.replace(/\.(png|ppm)$/i, '');
+      const outPath = `${basePath}_f${i}${ext}`;
+      await maybeWriteImage(frames[i]!, width, height, outPath);
+    }
+  }
+
+  // Optionally write discovered PI loads to file
+  if (discover && bootOut) {
+    try {
+      const outObj = { piLoads: piLoads.map(s => ({ cartAddr: `0x${(s.cartAddr>>>0).toString(16)}`, dramAddr: `0x${(s.dramAddr>>>0).toString(16)}`, length: `0x${(s.length>>>0).toString(16)}` })) };
+      await (await import('node:fs')).promises.mkdir((await import('node:path')).dirname(bootOut), { recursive: true });
+      await (await import('node:fs')).promises.writeFile(bootOut, JSON.stringify(outObj, null, 2));
+      // eslint-disable-next-line no-console
+      console.log(`[discover] wrote boot script to ${bootOut}`);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('Failed to write --boot-out file:', e);
+    }
+  }
+
+  console.log(JSON.stringify({
+    command: 'rom-boot-run',
+    rom: file,
+    initialPC: boot.initialPC >>> 0,
+    endPC: cpu.pc >>> 0,
+    cycles,
+    viInterval,
+    frames: frames.length,
+    vi: { origin: viOrigin >>> 0, width: viWidth >>> 0 },
+    events: { spStarts, piDmas: piReads },
+    ostasks: ostasks.length ? ostasks : undefined,
+    stopReason: stopReason || null,
+    snapshot: snapshot || null,
+    discovered: discover ? piLoads : undefined,
+    bridge: bridgeCRC32 ? { crc32: bridgeCRC32, snapshot: bridgeSnapshotPath } : undefined,
+  }, null, 2));
 }
 
 async function main() {
@@ -873,6 +1195,10 @@ async function main() {
   }
   if (cmd === 'sm64-rom-title') {
     await runSm64RomTitle(argv.slice(1));
+    return;
+  }
+  if (cmd === 'rom-boot-run') {
+    await runRomBootRun(argv.slice(1));
     return;
   }
   printUsage();

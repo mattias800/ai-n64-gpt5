@@ -5,6 +5,9 @@ import { Cop0 } from './cop0.js';
 
 export class CPU {
   readonly regs = new Uint32Array(32);
+  // Minimal COP1 (FPU) register file stub
+  readonly fpr = new Uint32Array(32);
+  fcr31 = 0 >>> 0; // control/status; bit 23 = condition flag
   hi = 0 >>> 0;
   lo = 0 >>> 0;
   pc = 0 >>> 0;
@@ -19,6 +22,10 @@ export class CPU {
   private branchTarget = 0 >>> 0;
   private branchPC = 0 >>> 0; // address of branch instruction (for EPC when BD)
 
+  // Minimal LL/SC state
+  private llValid = false;
+  private llAddr = 0 >>> 0;
+
   constructor(public readonly bus: Bus) {
     this.reset();
   }
@@ -32,6 +39,8 @@ export class CPU {
     this.branchCommitPending = false;
     this.branchTarget = 0;
     this.branchPC = 0;
+    this.llValid = false;
+    this.llAddr = 0 >>> 0;
   }
 
   private getReg(i: number): number {
@@ -179,6 +188,7 @@ export class CPU {
     const shamt = (instr >>> 6) & 0x1f;
     const funct = instr & 0x3f;
     const imm = instr & 0xffff;
+    const targetOffset = ((signExtend16(imm) << 2) >>> 0) >>> 0;
 
     switch (op) {
       case 0x00: { // SPECIAL (R-type)
@@ -326,6 +336,10 @@ export class CPU {
           }
           case 0x0d: { // BREAK
             throw new CPUException('Breakpoint', 0);
+          }
+          case 0x0f: { // SYNC (memory barrier)
+            // R4300i treats SYNC as a memory ordering barrier; for our purposes, it's a NOP
+            return;
           }
           default:
             throw new Error(`Unimplemented R-type funct=0x${funct.toString(16)}`);
@@ -642,6 +656,144 @@ export class CPU {
       }
       case 0x0f: { // LUI rt, imm
         this.setReg(rt, (imm << 16) >>> 0);
+        return;
+      }
+      case 0x31: { // LWC1 ft, offset(base)
+        const addr = this.addrCalc(rs, imm);
+        // ft encoded in rt field
+        const v = this.bus.loadU32(addr);
+        if ((rt >>> 0) < 32) this.fpr[rt] = v >>> 0;
+        return;
+      }
+      case 0x39: { // SWC1 ft, offset(base)
+        const addr = this.addrCalc(rs, imm);
+        const v = (rt >>> 0) < 32 ? ((this.fpr[rt] ?? 0) >>> 0) : 0;
+        this.bus.storeU32(addr, v >>> 0);
+        return;
+      }
+      case 0x11: { // COP1 (FPU) minimal stub
+        const rsField = rs; // per MIPS enc, this is fmt/control selector
+        // Control transfers and branch-on-c1 implement minimal semantics; arithmetic is NOP
+        switch (rsField) {
+          case 0x00: { // MFC1 rt, fs (move from FPR)
+            const fs = rd;
+            const val = (fs >>> 0) < 32 ? ((this.fpr[fs] ?? 0) >>> 0) : 0;
+            this.setReg(rt, val >>> 0);
+            return;
+          }
+          case 0x02: { // CFC1 rt, fs (move from FCR)
+            // Only FCR31 supported; encode rd as control reg index; return 0 for others
+            const ctrl = rd >>> 0;
+            const val = ctrl === 31 ? (this.fcr31 >>> 0) : 0;
+            this.setReg(rt, val >>> 0);
+            return;
+          }
+          case 0x04: { // MTC1 rt, fs (move to FPR)
+            const fs = rd;
+            if ((fs >>> 0) < 32) this.fpr[fs] = this.getReg(rt) >>> 0;
+            return;
+          }
+          case 0x06: { // CTC1 rt, fs (move to FCR)
+            const ctrl = rd >>> 0;
+            if (ctrl === 31) {
+              this.fcr31 = this.getReg(rt) >>> 0;
+            }
+            return;
+          }
+          case 0x08: { // BC1* (branch on FP condition)
+            const cond = ((this.fcr31 >>> 23) & 1) !== 0; // bit 23 is condition flag
+            const takeF = !cond;
+            const takeT = cond;
+            const target = (this.pc + targetOffset) >>> 0;
+            // rt encodes branch variant
+            switch (rt >>> 0) {
+              case 0x00: { // BC1F offset
+                if (takeF) { this.branchTarget = target; this.branchPending = true; this.branchPC = ((this.pc - 4) >>> 0); } else { this.branchPending = false; }
+                return;
+              }
+              case 0x01: { // BC1T offset
+                if (takeT) { this.branchTarget = target; this.branchPending = true; this.branchPC = ((this.pc - 4) >>> 0); } else { this.branchPending = false; }
+                return;
+              }
+              case 0x02: { // BC1FL offset (branch likely false)
+                if (takeF) { this.branchTarget = target; this.branchPending = true; this.branchPC = ((this.pc - 4) >>> 0); }
+                else { this.pc = (this.pc + 4) >>> 0; this.branchPending = false; }
+                return;
+              }
+              case 0x03: { // BC1TL offset (branch likely true)
+                if (takeT) { this.branchTarget = target; this.branchPending = true; this.branchPC = ((this.pc - 4) >>> 0); }
+                else { this.pc = (this.pc + 4) >>> 0; this.branchPending = false; }
+                return;
+              }
+              default:
+                // Unsupported variant: treat as NOP branch not taken
+                this.branchPending = false; return;
+            }
+          }
+          default:
+            // Treat unhandled COP1 ops as NOP to allow progression during boot
+            return;
+        }
+      }
+      case 0x18: { // DADDI rt, rs, imm (64-bit add immediate with overflow) - modeled as 32-bit ADDI
+        const a = (this.getReg(rs) | 0);
+        const b = (signExtend16(imm) | 0);
+        const r = (a + b) | 0;
+        if (((a ^ r) & (b ^ r)) < 0) {
+          throw new CPUException('Overflow', this.pc >>> 0);
+        }
+        this.setReg(rt, r >>> 0);
+        return;
+      }
+      case 0x19: { // DADDIU rt, rs, imm (64-bit add immediate unsigned) - modeled as 32-bit ADDIU
+        const res = (this.getReg(rs) + (signExtend16(imm) >>> 0)) >>> 0;
+        this.setReg(rt, res);
+        return;
+      }
+      case 0x1a: { // LDL rt, offset(base) - model as LW rt, offset(base)
+        const addr = this.addrCalc(rs, imm);
+        // No alignment trap for LDL in our model; do a 32-bit load
+        const v = this.bus.loadU32(addr);
+        this.setReg(rt, v >>> 0);
+        return;
+      }
+      case 0x1b: { // LDR rt, offset(base) - model as LW rt, offset(base)
+        const addr = this.addrCalc(rs, imm);
+        const v = this.bus.loadU32(addr);
+        this.setReg(rt, v >>> 0);
+        return;
+      }
+      case 0x2f: { // CACHE - no-op
+        return;
+      }
+      case 0x33: { // PREF - no-op
+        return;
+      }
+      case 0x30: { // LL rt, offset(base) - load linked (modeled as LW + set link)
+        const addr = this.addrCalc(rs, imm) >>> 0;
+        const v = this.bus.loadU32(addr);
+        this.setReg(rt, v >>> 0);
+        this.llValid = true; this.llAddr = addr & ~3;
+        return;
+      }
+      case 0x38: { // SC rt, offset(base) - store conditional (modeled as SW + success=1 when linked)
+        const addr = this.addrCalc(rs, imm) >>> 0;
+        const aligned = addr & ~3;
+        const success = this.llValid && (aligned === this.llAddr);
+        if (success) {
+          const v = this.getReg(rt) >>> 0;
+          this.bus.storeU32(addr, v);
+          this.setReg(rt, 1);
+        } else {
+          this.setReg(rt, 0);
+        }
+        this.llValid = false;
+        return;
+      }
+      case 0x3f: { // SD rt, offset(base) - store doubleword (modeled as SW)
+        const addr = this.addrCalc(rs, imm) >>> 0;
+        const v = this.getReg(rt) >>> 0;
+        this.bus.storeU32(addr, v);
         return;
       }
       case 0x10: { // COP0

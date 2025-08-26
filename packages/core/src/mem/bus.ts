@@ -36,9 +36,10 @@ export class Bus {
     this.si.setMI(this.mi);
     this.vi.setMI(this.mi);
     this.ai.setMI(this.mi);
-    // Provide SI/PI access to RDRAM for deterministic DMA
+    // Provide SI/PI/SP access to RDRAM for deterministic DMA
     this.si.setRDRAM(this.rdram.bytes);
     this.pi.setRDRAM(this.rdram.bytes);
+    this.sp.setRDRAM(this.rdram.bytes);
   }
 
   setROM(rom: Uint8Array): void {

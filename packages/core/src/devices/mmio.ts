@@ -91,36 +91,76 @@ export class MI extends MMIO {
 }
 
 // SP (RSP) minimal device
-export const SP_CMD_OFF = 0x00;
-export const SP_CMD_START = 1 << 0; // writing 1 starts a task (stub)
+export const SP_MEM_ADDR_OFF = 0x00; // also used for our SP_CMD_START compatibility
+export const SP_DRAM_ADDR_OFF = 0x04;
+export const SP_RD_LEN_OFF = 0x08;
+export const SP_WR_LEN_OFF = 0x0C;
+export const SP_CMD_OFF = SP_MEM_ADDR_OFF;
+export const SP_CMD_START = 1 << 0; // writing 1 to MEM_ADDR is treated as START for our stub compatibility
 export const SP_STATUS_OFF = 0x10;
 export const SP_STATUS_INTR = 1 << 0; // writing 1 clears pending
 export class SP extends MMIO {
   status = 0 >>> 0;
   private mi: MI | null = null;
+  private rdram: Uint8Array | null = null;
+  // Minimal 4KB DMEM buffer
+  readonly dmem = new Uint8Array(0x1000);
+  private memAddr = 0 >>> 0;
+  private dramAddr = 0 >>> 0;
   constructor() { super(SP_SIZE); }
   setMI(mi: MI) { this.mi = mi; }
+  setRDRAM(bytes: Uint8Array) { this.rdram = bytes; }
   override readU32(off: number): number {
     switch (off >>> 0) {
       case SP_STATUS_OFF: return this.status >>> 0;
+      case SP_MEM_ADDR_OFF: return this.memAddr >>> 0;
+      case SP_DRAM_ADDR_OFF: return this.dramAddr >>> 0;
       default: return super.readU32(off);
     }
   }
   override writeU32(off: number, val: number): void {
     val >>>= 0;
     switch (off >>> 0) {
-      case SP_CMD_OFF:
-        // Minimal stub: starting an SP task immediately signals completion interrupts
-        if (val & SP_CMD_START) {
-          if (this.mi) {
-            // Signal both SP and DP pending as if RSP task and RDP work completed
-            this.mi.raise(MI_INTR_SP);
-            this.mi.raise(MI_INTR_DP);
-          }
+      case SP_MEM_ADDR_OFF: {
+        // Compatibility: treat bit0=1 as START command for tests; otherwise set mem addr
+        if ((val & SP_CMD_START) !== 0 && val === SP_CMD_START) {
+          if (this.mi) { this.mi.raise(MI_INTR_SP); this.mi.raise(MI_INTR_DP); }
+        } else {
+          this.memAddr = val >>> 0;
         }
-        // Preserve written value for scaffolding tests
         super.writeU32(off, val);
         return;
+      }
+      case SP_DRAM_ADDR_OFF:
+        this.dramAddr = val >>> 0;
+        super.writeU32(off, val);
+        return;
+      case SP_RD_LEN_OFF: {
+        // Copy from RDRAM[dramAddr] -> DMEM[memAddr]
+        const len = ((val & 0x00ffffff) >>> 0) + 1;
+        if (this.rdram) {
+          for (let i = 0; i < len; i++) {
+            const b = this.rdram[(this.dramAddr + i) >>> 0] ?? 0;
+            const di = (this.memAddr + i) & 0x0FFF;
+            this.dmem[di] = b;
+          }
+        }
+        super.writeU32(off, val);
+        return;
+      }
+      case SP_WR_LEN_OFF: {
+        // Copy from DMEM[memAddr] -> RDRAM[dramAddr]
+        const len = ((val & 0x00ffffff) >>> 0) + 1;
+        if (this.rdram) {
+          for (let i = 0; i < len; i++) {
+            const si = (this.memAddr + i) & 0x0FFF;
+            const b = this.dmem[si] ?? 0;
+            if ((this.dramAddr + i) < this.rdram.length) this.rdram[this.dramAddr + i] = b;
+          }
+        }
+        super.writeU32(off, val);
+        return;
+      }
       case SP_STATUS_OFF:
         if (val & SP_STATUS_INTR) { if (this.mi) this.mi.clear(MI_INTR_SP); }
         // Also store value for visibility
