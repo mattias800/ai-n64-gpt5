@@ -26,6 +26,9 @@ export class CPU {
   private llValid = false;
   private llAddr = 0 >>> 0;
 
+  // Optional single-step trace callback
+  onTrace?: (pc: number, instr: number) => void;
+
   constructor(public readonly bus: Bus) {
     this.reset();
   }
@@ -117,6 +120,8 @@ export class CPU {
     }
 
     const instr = this.bus.loadU32(instrPC);
+    // Emit trace for this instruction fetch
+    if (this.onTrace) { try { this.onTrace(instrPC >>> 0, instr >>> 0); } catch {} }
     this.pc = (instrPC + 4) >>> 0;
     try {
       this.execute(instr);
@@ -606,6 +611,8 @@ export class CPU {
         const addr = this.addrCalc(rs, imm);
         const v = this.getReg(rt) & 0xff;
         this.bus.storeU8(addr, v);
+        // Invalidate LL on same word
+        this.invalidateLL(addr);
         return;
       }
       case 0x29: { // SH rt, offset(base)
@@ -613,6 +620,7 @@ export class CPU {
         this.checkAlign(addr, 2, true);
         const v = this.getReg(rt) & 0xffff;
         this.bus.storeU16(addr, v);
+        this.invalidateLL(addr);
         return;
       }
       case 0x2a: { // SWL rt, offset(base) - big-endian per-byte semantics
@@ -629,6 +637,7 @@ export class CPU {
         if (k <= 2) this.bus.storeU8(aligned + 1, b1);
         if (k <= 1) this.bus.storeU8(aligned + 2, b2);
         if (k <= 0) this.bus.storeU8(aligned + 3, b3);
+        this.invalidateLL(addr);
         return;
       }
       case 0x2b: { // SW rt, offset(base)
@@ -636,6 +645,7 @@ export class CPU {
         this.checkAlign(addr, 4, true);
         const v = this.getReg(rt);
         this.bus.storeU32(addr, v);
+        this.invalidateLL(addr);
         return;
       }
       case 0x2e: { // SWR rt, offset(base) - big-endian per-byte semantics
@@ -652,6 +662,7 @@ export class CPU {
         if (k >= 2) this.bus.storeU8(aligned + 1, b1);
         if (k >= 1) this.bus.storeU8(aligned + 2, b2);
         this.bus.storeU8(aligned + 3, b3);
+        this.invalidateLL(addr);
         return;
       }
       case 0x0f: { // LUI rt, imm
@@ -750,17 +761,36 @@ export class CPU {
         this.setReg(rt, res);
         return;
       }
-      case 0x1a: { // LDL rt, offset(base) - model as LW rt, offset(base)
+      case 0x1a: { // LDL rt, offset(base) - big-endian 64-bit partial load (left)
         const addr = this.addrCalc(rs, imm);
-        // No alignment trap for LDL in our model; do a 32-bit load
-        const v = this.bus.loadU32(addr);
-        this.setReg(rt, v >>> 0);
+        const aligned = addr & ~7;
+        const k = addr & 7;
+        // Merge bytes from left side into rt (simulate 64-bit low word only)
+        let lo = this.getReg(rt) >>> 0;
+        // bytes indices for big-endian 8-byte: [0..7]
+        // LDL loads most significant bytes down to k
+        for (let i = 0; i <= (7 - k); i++) {
+          const byte = this.bus.loadU8(aligned + i);
+          const bitPos = ((i % 4) ^ 3) * 8; // map to low 32 bits position
+          const mask = ~(0xff << bitPos) >>> 0;
+          lo = ((lo & mask) | ((byte & 0xff) << bitPos)) >>> 0;
+        }
+        this.setReg(rt, lo >>> 0);
         return;
       }
-      case 0x1b: { // LDR rt, offset(base) - model as LW rt, offset(base)
+      case 0x1b: { // LDR rt, offset(base) - big-endian 64-bit partial load (right)
         const addr = this.addrCalc(rs, imm);
-        const v = this.bus.loadU32(addr);
-        this.setReg(rt, v >>> 0);
+        const aligned = addr & ~7;
+        const k = addr & 7;
+        // LDR loads least significant bytes from k..7
+        let lo = this.getReg(rt) >>> 0;
+        for (let i = k; i < 8; i++) {
+          const byte = this.bus.loadU8(aligned + i);
+          const bitPos = ((i % 4) ^ 3) * 8;
+          const mask = ~(0xff << bitPos) >>> 0;
+          lo = ((lo & mask) | ((byte & 0xff) << bitPos)) >>> 0;
+        }
+        this.setReg(rt, lo >>> 0);
         return;
       }
       case 0x2f: { // CACHE - no-op
@@ -784,16 +814,25 @@ export class CPU {
           const v = this.getReg(rt) >>> 0;
           this.bus.storeU32(addr, v);
           this.setReg(rt, 1);
+          this.invalidateLL(addr);
         } else {
           this.setReg(rt, 0);
         }
         this.llValid = false;
         return;
       }
-      case 0x3f: { // SD rt, offset(base) - store doubleword (modeled as SW)
+      case 0x3f: { // SD rt, offset(base) - store doubleword (lower 32 bits only for now)
         const addr = this.addrCalc(rs, imm) >>> 0;
         const v = this.getReg(rt) >>> 0;
-        this.bus.storeU32(addr, v);
+        // Store as two 32-bit words big-endian (simulate 64-bit)
+        const aligned = addr & ~7;
+        const k = addr & 7; // alignment within 8-byte
+        // For now, write low 32 bits into the appropriate half depending on k; full SDL/SDR handle partials
+        // Simplified: if aligned to word boundary, write at addr; otherwise write bytes
+        for (let i = 0; i < 4; i++) {
+          this.bus.storeU8(addr + i, (v >>> (24 - i*8)) & 0xff);
+        }
+        this.invalidateLL(addr);
         return;
       }
       case 0x10: { // COP0
@@ -832,6 +871,11 @@ export class CPU {
       default:
         throw new Error(`Unimplemented opcode=0x${op.toString(16)} instr=0x${instr.toString(16)}`);
     }
+  }
+
+  private invalidateLL(addr: number): void {
+    const aligned = (addr >>> 0) & ~3;
+    if (this.llValid && this.llAddr === aligned) this.llValid = false;
   }
 }
 

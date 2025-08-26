@@ -847,7 +847,7 @@ async function runSm64RomTitle(args: string[]) {
 }
 
 async function runRomBootRun(args: string[]) {
-  // Arguments: <rom> [--cycles N] [--vi-interval CYC] [--width W] [--height H] [--snapshot path.png] [--discover] [--boot path.json] [--boot-out path.json]
+  // Arguments: <rom> [--cycles N] [--vi-interval CYC] [--width W] [--height H] [--snapshot path.png] [--discover] [--boot path.json] [--boot-out path.json] [--trace-boot N]
   const file = args.find(a => !a.startsWith('--'));
   if (!file) { console.error('rom-boot-run requires a ROM file path'); process.exit(1); }
   const opts: Record<string, string> = {};
@@ -871,6 +871,7 @@ async function runRomBootRun(args: string[]) {
   const iplHle = Object.prototype.hasOwnProperty.call(opts, 'ipl-hle');
   const iplCart = parseNum(opts['ipl-cart'], 0);
   const iplLen = parseNum(opts['ipl-len'], 2 * 1024 * 1024);
+  const traceBoot = parseNum(opts['trace-boot'], 0);
 
   const fs = await import('node:fs');
   const rom = fs.readFileSync(file);
@@ -885,6 +886,12 @@ async function runRomBootRun(args: string[]) {
   const bus = new Bus(rdram);
   const cpu = new CPU(bus);
   const sys = new System(cpu, bus);
+  const trace: { pc: string, instr: string }[] = [];
+  if (traceBoot > 0) {
+    cpu.onTrace = (pc, instr) => {
+      if (trace.length < traceBoot) trace.push({ pc: `0x${pc.toString(16)}`, instr: `0x${instr.toString(16)}` });
+    };
+  }
 
   // Utility to hex-encode a byte array
   const toHex = (arr: Uint8Array) => Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
@@ -1174,6 +1181,7 @@ async function runRomBootRun(args: string[]) {
     discovered: discover ? piLoads : undefined,
     bridge: bridgeCRC32 ? { crc32: bridgeCRC32, snapshot: bridgeSnapshotPath } : undefined,
     ipl,
+    trace: traceBoot > 0 ? trace : undefined,
   }, null, 2));
 }
 
