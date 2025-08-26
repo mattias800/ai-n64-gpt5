@@ -44,7 +44,7 @@ export function writeRSPTitleDLsToRDRAM(
   return baseAddr >>> 0;
 }
 
-function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number, maxWords: number): void {
+export function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: number, maxWords: number): void {
   let addr = dlAddr >>> 0;
   let wordsLeft = maxWords >>> 0;
   let currentTLUT: Uint16Array | null = null;
@@ -1144,5 +1144,28 @@ export function scheduleF3DEXFromTableAndRun(
   const res = runFrameLoop(cpu, bus, sys, totalCycles);
   const image = viScanout(bus, width, height);
   return { image, frames: perFrameImages, res };
+}
+
+// Translate a single F3DEX DL at dlAddr into RSPDL and execute immediately in the current framebuffer context.
+// This raises a DP interrupt after rendering. Intended for HLE SP task bridging during real ROM execution.
+export function translateF3DEXAndExecNow(
+  bus: Bus,
+  width: number,
+  height: number,
+  dlAddr: number,
+  stagingAddr: number,
+  strideWords: number,
+  bgStart5551?: number,
+  bgEnd5551?: number,
+): void {
+  if (bgStart5551 !== undefined && bgEnd5551 !== undefined) {
+    viDrawHorizontalGradient(bus, width, height, bgStart5551 >>> 0, bgEnd5551 >>> 0);
+  }
+  const uc = translateF3DEXToUc(bus as any, dlAddr >>> 0, strideWords >>> 0);
+  const words = ucToRspdlWords(uc, strideWords >>> 0);
+  let p = stagingAddr >>> 0;
+  for (let i = 0; i < words.length; i++) { bus.storeU32(p, (words[i]! >>> 0)); p = (p + 4) >>> 0; }
+  execRSPDLFrame(bus, width >>> 0, height >>> 0, stagingAddr >>> 0, strideWords >>> 0);
+  bus.dp.raiseInterrupt();
 }
 

@@ -4,7 +4,8 @@ import { CPUException } from './exceptions.js';
 import { Cop0 } from './cop0.js';
 
 export class CPU {
-  readonly regs = new Uint32Array(32);
+  readonly regs = new Uint32Array(32); // low 32 bits of GPRs
+  readonly regsHi = new Uint32Array(32); // high 32 bits of GPRs (for 64-bit ops)
   // Minimal COP1 (FPU) register file stub
   readonly fpr = new Uint32Array(32);
   fcr31 = 0 >>> 0; // control/status; bit 23 = condition flag
@@ -13,8 +14,24 @@ export class CPU {
   pc = 0 >>> 0;
   inDelaySlot = false;
 
+  // Fastboot/HLE option: when enabled, treat ReservedInstruction as a NOP (skip)
+  // instead of raising an exception. Default is false to preserve accuracy.
+  public fastbootSkipReserved = false;
+
   // Minimal CP0 for exception state
   readonly cop0 = new Cop0();
+
+  // Minimal TLB implementation for KUSEG translation
+  private static readonly TLB_SIZE = 32;
+  private tlb: Array<{
+    mask: number; // 0 for 4KB pages
+    vpn2: number; // bits [31:13] of VA
+    asid: number; // 8-bit
+    g: boolean;
+    pfn0: number; pfn1: number; // frame numbers >> 12
+    v0: boolean; d0: boolean; v1: boolean; d1: boolean;
+  }>; 
+  private tlbRandom = 31 >>> 0; // start at max index
 
   // Branch delay management
   private branchPending = false; // delay slot to execute
@@ -30,11 +47,17 @@ export class CPU {
   onTrace?: (pc: number, instr: number) => void;
 
   constructor(public readonly bus: Bus) {
+    // Initialize empty TLB entries
+    this.tlb = new Array(CPU.TLB_SIZE);
+    for (let i = 0; i < CPU.TLB_SIZE; i++) {
+      this.tlb[i] = { mask: 0, vpn2: 0, asid: 0, g: false, pfn0: 0, pfn1: 0, v0: false, d0: false, v1: false, d1: false };
+    }
     this.reset();
   }
 
   reset(): void {
     this.regs.fill(0);
+    this.regsHi.fill(0);
     this.hi = 0;
     this.lo = 0;
     this.pc = 0; // HLE boot will set this appropriately later
@@ -56,12 +79,37 @@ export class CPU {
   private setReg(i: number, value: number): void {
     if ((i >>> 0) >= 32) return;
     if (i === 0) return; // $zero is immutable
-    this.regs[i] = toUint32(value);
+    const v = toUint32(value);
+    this.regs[i] = v;
+    // Sign-extend 32-bit results into 64-bit GPRs per MIPS64 rules
+    this.regsHi[i] = ((v >>> 31) !== 0) ? 0xFFFFFFFF : 0x00000000;
+  }
+
+  private setReg64(i: number, hi: number, lo: number): void {
+    if ((i >>> 0) >= 32) return;
+    if (i === 0) return;
+    this.regs[i] = toUint32(lo);
+    this.regsHi[i] = toUint32(hi);
+  }
+
+  private getRegHi(i: number): number {
+    if ((i >>> 0) >= 32) return 0;
+    const v = this.regsHi[i] as number | undefined;
+    return (v ?? 0) >>> 0;
   }
 
   step(): void {
     // Advance CP0 timer
     this.cop0.tick();
+    // Advance Random register domain (simple decrement within TLB range)
+    const wired = (this.cop0.read(6) >>> 0) & 0x3f; // Wired
+    const max = CPU.TLB_SIZE - 1;
+    let r = this.tlbRandom | 0;
+    r = (r - 1);
+    if (r < Math.max(wired, 0)) r = max;
+    this.tlbRandom = (r >>> 0);
+    // Keep CP0 Random updated (for visibility)
+    this.cop0.write(1, this.tlbRandom >>> 0);
 
     // If a branch commit is pending (delay slot already executed), check interrupts before committing branch
     if (this.branchCommitPending) {
@@ -83,7 +131,7 @@ export class CPU {
     if (this.branchPending) {
       const delayInstrPC = this.pc; // address of delay slot instruction
       const branchInstrPC = (delayInstrPC - 4) >>> 0; // address of branch
-      const delayInstr = this.bus.loadU32(delayInstrPC);
+      const delayInstr = this.loadU32TLB(delayInstrPC, true);
       const afterDelay = (delayInstrPC + 4) >>> 0;
       const target = this.branchTarget >>> 0;
       // Execute delay slot with BD semantics
@@ -119,7 +167,7 @@ export class CPU {
       return;
     }
 
-    const instr = this.bus.loadU32(instrPC);
+    const instr = this.loadU32TLB(instrPC, true);
     // Emit trace for this instruction fetch
     if (this.onTrace) { try { this.onTrace(instrPC >>> 0, instr >>> 0); } catch {} }
     this.pc = (instrPC + 4) >>> 0;
@@ -139,6 +187,47 @@ export class CPU {
     return (this.getReg(baseReg) + (signExtend16(imm) >>> 0)) >>> 0;
   }
 
+  // Address translation using KSEG rules and TLB for KUSEG (4KB pages only for now)
+  private translateAddress(vaddr: number, acc: 'r'|'w'|'x'): number {
+    const va = vaddr >>> 0;
+    const region = va >>> 28;
+    if (region === 0x8 || region === 0x9) return (va - 0x8000_0000) >>> 0; // KSEG0 cached
+    if (region === 0xA || region === 0xB) return (va - 0xA000_0000) >>> 0; // KSEG1 uncached
+    // KUSEG and others via TLB (support 4KB pages; ignore PageMask for now)
+    const asid = (this.cop0.read(10) >>> 0) & 0xff; // EntryHi ASID
+    const vpn2 = (va >>> 13) >>> 0;
+    for (let i = 0; i < CPU.TLB_SIZE; i++) {
+      const e = this.tlb[i]!;
+      if (e.mask !== 0) {
+        // For now ignore mask variations; only exact 4KB supported
+      }
+      if (e.vpn2 === vpn2 && (e.g || e.asid === asid)) {
+        const odd = ((va >>> 12) & 1) !== 0;
+        const v = odd ? e.v1 : e.v0;
+        const d = odd ? e.d1 : e.d0;
+        if (!v) {
+          // Treat invalid as unmapped: fall back to direct physical address
+          return va >>> 0;
+        }
+        if (acc === 'w' && !d) {
+          // Not dirty: allow write anyway for now (can raise Mod exception later)
+        }
+        const pfn = odd ? e.pfn1 : e.pfn0;
+        const paddr = (((pfn << 12) >>> 0) | (va & 0xFFF)) >>> 0;
+        return paddr >>> 0;
+      }
+    }
+    // No match: permissive fallback (treat as unmapped -> 0) but return VA to avoid crash on stores to low memory
+    return va >>> 0;
+  }
+
+  private loadU8TLB(addr: number, exec = false): number { return this.bus.loadU8Phys(this.translateAddress(addr, exec ? 'x' : 'r')); }
+  private loadU16TLB(addr: number): number { return this.bus.loadU16Phys(this.translateAddress(addr, 'r')); }
+  private loadU32TLB(addr: number, exec = false): number { return this.bus.loadU32Phys(this.translateAddress(addr, exec ? 'x' : 'r')); }
+  private storeU8TLB(addr: number, value: number): void { this.bus.storeU8Phys(this.translateAddress(addr, 'w'), value >>> 0); this.invalidateLL(addr); }
+  private storeU16TLB(addr: number, value: number): void { this.bus.storeU16Phys(this.translateAddress(addr, 'w'), value >>> 0); this.invalidateLL(addr); }
+  private storeU32TLB(addr: number, value: number): void { this.bus.storeU32Phys(this.translateAddress(addr, 'w'), value >>> 0); this.invalidateLL(addr); }
+
   private checkAlign(addr: number, align: number, isStore: boolean): void {
     if ((addr & (align - 1)) !== 0) {
       throw new CPUException(isStore ? 'AddressErrorStore' : 'AddressErrorLoad', addr >>> 0);
@@ -154,6 +243,7 @@ export class CPU {
       Syscall: 8,
       Breakpoint: 9,
       ReservedInstruction: 10,
+      Trap: 13,
     };
     const code = excMap[ex.code] ?? 0;
     this.cop0.setException(code, faultingPC >>> 0, badVAddr, inDelaySlot);
@@ -336,6 +426,27 @@ export class CPU {
             this.lo = q; this.hi = r;
             return;
           }
+          // 64-bit mult/div group (DMULT/DMULTU/DDIV/DDIVU) - modeled via 32-bit args
+          case 0x1c: { // DMULT rs, rt (signed 64x64 -> 128, modeled from 32-bit inputs)
+            const { hi, lo } = mul64Signed(this.getReg(rs), this.getReg(rt));
+            this.hi = hi; this.lo = lo;
+            return;
+          }
+          case 0x1d: { // DMULTU rs, rt (unsigned)
+            const { hi, lo } = mul64Unsigned(this.getReg(rs), this.getReg(rt));
+            this.hi = hi; this.lo = lo;
+            return;
+          }
+          case 0x1e: { // DDIV rs, rt (signed) - modeled from 32-bit inputs
+            const { q, r } = div32Signed(this.getReg(rs), this.getReg(rt));
+            this.lo = q; this.hi = r;
+            return;
+          }
+          case 0x1f: { // DDIVU rs, rt (unsigned)
+            const { q, r } = div32Unsigned(this.getReg(rs), this.getReg(rt));
+            this.lo = q; this.hi = r;
+            return;
+          }
           case 0x0c: { // SYSCALL
             throw new CPUException('Syscall', 0);
           }
@@ -346,8 +457,76 @@ export class CPU {
             // R4300i treats SYNC as a memory ordering barrier; for our purposes, it's a NOP
             return;
           }
+          // 64-bit shift group (MIPS64)
+          case 0x38: { // DSLL rd, rt, shamt (0..31)
+            const sa = shamt & 0x1f;
+            const hi0 = this.getRegHi(rt) >>> 0;
+            const lo0 = this.getReg(rt) >>> 0;
+            let hiN = 0 >>> 0, loN = 0 >>> 0;
+            if (sa === 0) { hiN = hi0; loN = lo0; }
+            else {
+              hiN = ((hi0 << sa) | (lo0 >>> (32 - sa))) >>> 0;
+              loN = (lo0 << sa) >>> 0;
+            }
+            this.setReg64(rd, hiN, loN);
+            return;
+          }
+          case 0x3a: { // DSRL rd, rt, shamt (logical, 0..31)
+            const sa = shamt & 0x1f;
+            const hi0 = this.getRegHi(rt) >>> 0;
+            const lo0 = this.getReg(rt) >>> 0;
+            let hiN = 0 >>> 0, loN = 0 >>> 0;
+            if (sa === 0) { hiN = hi0; loN = lo0; }
+            else {
+              loN = ((lo0 >>> sa) | (hi0 << (32 - sa))) >>> 0;
+              hiN = (hi0 >>> sa) >>> 0;
+            }
+            this.setReg64(rd, hiN, loN);
+            return;
+          }
+          case 0x3b: { // DSRA rd, rt, shamt (arithmetic, 0..31)
+            const sa = shamt & 0x1f;
+            let hi0 = this.getRegHi(rt) >>> 0;
+            const lo0 = this.getReg(rt) >>> 0;
+            let hiN = 0 >>> 0, loN = 0 >>> 0;
+            if (sa === 0) { hiN = hi0; loN = lo0; }
+            else {
+              const hiSigned = (hi0 | 0);
+              loN = ((lo0 >>> sa) | ((hi0 << (32 - sa)) >>> 0)) >>> 0;
+              hiN = (hiSigned >> sa) >>> 0;
+            }
+            this.setReg64(rd, hiN, loN);
+            return;
+          }
+          case 0x3c: { // DSLL32 rd, rt, shamt (shifts left by 32+sa)
+            const sa = shamt & 0x1f;
+            const lo0 = this.getReg(rt) >>> 0;
+            const hiN = (lo0 << sa) >>> 0;
+            const loN = 0 >>> 0;
+            this.setReg64(rd, hiN, loN);
+            return;
+          }
+          case 0x3e: { // DSRL32 rd, rt, shamt (logical right by 32+sa)
+            const sa = shamt & 0x1f;
+            const hi0 = this.getRegHi(rt) >>> 0;
+            const loN = (hi0 >>> sa) >>> 0;
+            const hiN = 0 >>> 0;
+            this.setReg64(rd, hiN, loN);
+            return;
+          }
+          case 0x3f: { // DSRA32 rd, rt, shamt (arith right by 32+sa)
+            const sa = shamt & 0x1f;
+            const hi0 = this.getRegHi(rt) >>> 0;
+            const hiSigned = (hi0 | 0);
+            const loN = (hiSigned >> sa) >>> 0;
+            const hiN = ((hi0 >>> 31) !== 0) ? 0xFFFFFFFF : 0x00000000;
+            this.setReg64(rd, hiN, loN);
+            return;
+          }
           default:
-            throw new Error(`Unimplemented R-type funct=0x${funct.toString(16)}`);
+            // Treat unknown R-type as ReservedInstruction (or skip in fastboot)
+            if (this.fastbootSkipReserved) return;
+            throw new CPUException('ReservedInstruction', this.pc >>> 0);
         }
       }
       case 0x02: { // J target
@@ -486,8 +665,46 @@ export class CPU {
             if (rsValSigned >= 0) { this.setReg(31, linkAddr); this.branchTarget = target; this.branchPending = true; this.branchPC = ((this.pc - 4) >>> 0); }
             else { this.branchPending = false; this.pc = (this.pc + 4) >>> 0; }
             return;
+          case 0x08: { // TGEI rs, imm (signed)
+            const rsS = (this.getReg(rs) | 0);
+            const immS = (signExtend16(imm) | 0);
+            if (rsS >= immS) { if (!this.fastbootSkipReserved) throw new CPUException('Trap', 0); }
+            return;
+          }
+          case 0x09: { // TGEIU rs, imm (unsigned)
+            const rsU = (this.getReg(rs) >>> 0);
+            const immU = (signExtend16(imm) >>> 0);
+            if (rsU >= immU) { if (!this.fastbootSkipReserved) throw new CPUException('Trap', 0); }
+            return;
+          }
+          case 0x0a: { // TLTI rs, imm (signed)
+            const rsS = (this.getReg(rs) | 0);
+            const immS = (signExtend16(imm) | 0);
+            if (rsS < immS) { if (!this.fastbootSkipReserved) throw new CPUException('Trap', 0); }
+            return;
+          }
+          case 0x0b: { // TLTIU rs, imm (unsigned)
+            const rsU = (this.getReg(rs) >>> 0);
+            const immU = (signExtend16(imm) >>> 0);
+            if (rsU < immU) { if (!this.fastbootSkipReserved) throw new CPUException('Trap', 0); }
+            return;
+          }
+          case 0x0c: { // TEQI rs, imm
+            const rsS = (this.getReg(rs) | 0);
+            const immS = (signExtend16(imm) | 0);
+            if (rsS === immS) { if (!this.fastbootSkipReserved) throw new CPUException('Trap', 0); }
+            return;
+          }
+          case 0x0e: { // TNEI rs, imm
+            const rsS = (this.getReg(rs) | 0);
+            const immS = (signExtend16(imm) | 0);
+            if (rsS !== immS) { if (!this.fastbootSkipReserved) throw new CPUException('Trap', 0); }
+            return;
+          }
           default:
-            throw new Error(`Unimplemented REGIMM rt=0x${rtField.toString(16)}`);
+            // Treat unknown REGIMM variant as ReservedInstruction (or skip in fastboot)
+            if (this.fastbootSkipReserved) return;
+            throw new CPUException('ReservedInstruction', this.pc >>> 0);
         }
       }
       case 0x0c: { // ANDI rt, rs, imm
@@ -531,20 +748,20 @@ export class CPU {
       }
       case 0x20: { // LB rt, offset(base)
         const addr = this.addrCalc(rs, imm);
-        const b = this.bus.loadU8(addr);
+        const b = this.loadU8TLB(addr);
         this.setReg(rt, signExtend8(b));
         return;
       }
       case 0x24: { // LBU rt, offset(base)
         const addr = this.addrCalc(rs, imm);
-        const b = this.bus.loadU8(addr);
+        const b = this.loadU8TLB(addr);
         this.setReg(rt, b & 0xff);
         return;
       }
       case 0x21: { // LH rt, offset(base)
         const addr = this.addrCalc(rs, imm);
         this.checkAlign(addr, 2, false);
-        const h = this.bus.loadU16(addr);
+        const h = this.loadU16TLB(addr);
         // sign extend 16
         this.setReg(rt, signExtend16(h));
         return;
@@ -552,7 +769,7 @@ export class CPU {
       case 0x25: { // LHU rt, offset(base)
         const addr = this.addrCalc(rs, imm);
         this.checkAlign(addr, 2, false);
-        const h = this.bus.loadU16(addr);
+        const h = this.loadU16TLB(addr);
         this.setReg(rt, h & 0xffff);
         return;
       }
@@ -561,10 +778,10 @@ export class CPU {
         const aligned = addr & ~3;
         const k = addr & 3;
         const old = this.getReg(rt);
-        const m0 = this.bus.loadU8(aligned + 0);
-        const m1 = this.bus.loadU8(aligned + 1);
-        const m2 = this.bus.loadU8(aligned + 2);
-        const m3 = this.bus.loadU8(aligned + 3);
+        const m0 = this.loadU8TLB(aligned + 0);
+        const m1 = this.loadU8TLB(aligned + 1);
+        const m2 = this.loadU8TLB(aligned + 2);
+        const m3 = this.loadU8TLB(aligned + 3);
         let b0 = (old >>> 24) & 0xff;
         let b1 = (old >>> 16) & 0xff;
         let b2 = (old >>> 8) & 0xff;
@@ -581,7 +798,7 @@ export class CPU {
       case 0x23: { // LW rt, offset(base)
         const addr = this.addrCalc(rs, imm);
         this.checkAlign(addr, 4, false);
-        const w = this.bus.loadU32(addr);
+        const w = this.loadU32TLB(addr);
         this.setReg(rt, w);
         return;
       }
@@ -590,10 +807,10 @@ export class CPU {
         const aligned = addr & ~3;
         const k = addr & 3;
         const old = this.getReg(rt);
-        const m0 = this.bus.loadU8(aligned + 0);
-        const m1 = this.bus.loadU8(aligned + 1);
-        const m2 = this.bus.loadU8(aligned + 2);
-        const m3 = this.bus.loadU8(aligned + 3);
+        const m0 = this.loadU8TLB(aligned + 0);
+        const m1 = this.loadU8TLB(aligned + 1);
+        const m2 = this.loadU8TLB(aligned + 2);
+        const m3 = this.loadU8TLB(aligned + 3);
         let b0 = (old >>> 24) & 0xff;
         let b1 = (old >>> 16) & 0xff;
         let b2 = (old >>> 8) & 0xff;
@@ -610,17 +827,14 @@ export class CPU {
       case 0x28: { // SB rt, offset(base)
         const addr = this.addrCalc(rs, imm);
         const v = this.getReg(rt) & 0xff;
-        this.bus.storeU8(addr, v);
-        // Invalidate LL on same word
-        this.invalidateLL(addr);
+        this.storeU8TLB(addr, v);
         return;
       }
       case 0x29: { // SH rt, offset(base)
         const addr = this.addrCalc(rs, imm);
         this.checkAlign(addr, 2, true);
         const v = this.getReg(rt) & 0xffff;
-        this.bus.storeU16(addr, v);
-        this.invalidateLL(addr);
+        this.storeU16TLB(addr, v);
         return;
       }
       case 0x2a: { // SWL rt, offset(base) - big-endian per-byte semantics
@@ -633,20 +847,18 @@ export class CPU {
         const b2 = (v >>> 8) & 0xff;
         const b3 = v & 0xff;
         // store left bytes m0..mk (k=0 -> all four; k=3 -> only offset 0)
-        this.bus.storeU8(aligned + 0, b0);
-        if (k <= 2) this.bus.storeU8(aligned + 1, b1);
-        if (k <= 1) this.bus.storeU8(aligned + 2, b2);
-        if (k <= 0) this.bus.storeU8(aligned + 3, b3);
-        this.invalidateLL(addr);
+        this.storeU8TLB(aligned + 0, b0);
+        if (k <= 2) this.storeU8TLB(aligned + 1, b1);
+        if (k <= 1) this.storeU8TLB(aligned + 2, b2);
+        if (k <= 0) this.storeU8TLB(aligned + 3, b3);
         return;
       }
       case 0x2b: { // SW rt, offset(base)
         const addr = this.addrCalc(rs, imm);
         this.checkAlign(addr, 4, true);
         const v = this.getReg(rt);
-        this.bus.storeU32(addr, v);
-        this.invalidateLL(addr);
-        return;
+        this.storeU32TLB(addr, v);
+       return;
       }
       case 0x2e: { // SWR rt, offset(base) - big-endian per-byte semantics
         const addr = this.addrCalc(rs, imm);
@@ -658,11 +870,10 @@ export class CPU {
         const b2 = (v >>> 8) & 0xff;
         const b3 = v & 0xff;
         // store right bytes mk..m3 (k=0 -> offset 3 only; k=3 -> all four)
-        if (k >= 3) this.bus.storeU8(aligned + 0, b0);
-        if (k >= 2) this.bus.storeU8(aligned + 1, b1);
-        if (k >= 1) this.bus.storeU8(aligned + 2, b2);
-        this.bus.storeU8(aligned + 3, b3);
-        this.invalidateLL(addr);
+        if (k >= 3) this.storeU8TLB(aligned + 0, b0);
+        if (k >= 2) this.storeU8TLB(aligned + 1, b1);
+        if (k >= 1) this.storeU8TLB(aligned + 2, b2);
+        this.storeU8TLB(aligned + 3, b3);
         return;
       }
       case 0x0f: { // LUI rt, imm
@@ -672,17 +883,53 @@ export class CPU {
       case 0x31: { // LWC1 ft, offset(base)
         const addr = this.addrCalc(rs, imm);
         // ft encoded in rt field
-        const v = this.bus.loadU32(addr);
+        const v = this.loadU32TLB(addr);
         if ((rt >>> 0) < 32) this.fpr[rt] = v >>> 0;
+        return;
+      }
+      case 0x35: { // LDC1 ft, offset(base) - load 64-bit into ft(ft+1)
+        const addr = this.addrCalc(rs, imm) >>> 0;
+        const p = addr & ~7;
+        const b0 = this.loadU8TLB(p + 0) & 0xff;
+        const b1 = this.loadU8TLB(p + 1) & 0xff;
+        const b2 = this.loadU8TLB(p + 2) & 0xff;
+        const b3 = this.loadU8TLB(p + 3) & 0xff;
+        const b4 = this.loadU8TLB(p + 4) & 0xff;
+        const b5 = this.loadU8TLB(p + 5) & 0xff;
+        const b6 = this.loadU8TLB(p + 6) & 0xff;
+        const b7 = this.loadU8TLB(p + 7) & 0xff;
+        const hi = ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) >>> 0;
+        const lo = ((b4 << 24) | (b5 << 16) | (b6 << 8) | b7) >>> 0;
+        const ft = rt >>> 0;
+        if (ft < 32) {
+          this.fpr[ft] = hi >>> 0;
+          if ((ft + 1) < 32) this.fpr[ft + 1] = lo >>> 0;
+        }
         return;
       }
       case 0x39: { // SWC1 ft, offset(base)
         const addr = this.addrCalc(rs, imm);
         const v = (rt >>> 0) < 32 ? ((this.fpr[rt] ?? 0) >>> 0) : 0;
-        this.bus.storeU32(addr, v >>> 0);
+        this.storeU32TLB(addr, v >>> 0);
         return;
       }
-      case 0x11: { // COP1 (FPU) minimal stub
+      case 0x3d: { // SDC1 ft, offset(base) - store 64-bit from ft(ft+1)
+        const addr = this.addrCalc(rs, imm) >>> 0;
+        const p = addr & ~7;
+        const ft = rt >>> 0;
+        const hi = (ft < 32) ? ((this.fpr[ft] ?? 0) >>> 0) : 0;
+        const lo = ((ft + 1) < 32) ? ((this.fpr[ft + 1] ?? 0) >>> 0) : 0;
+        this.storeU8TLB(p + 0, (hi >>> 24) & 0xff);
+        this.storeU8TLB(p + 1, (hi >>> 16) & 0xff);
+        this.storeU8TLB(p + 2, (hi >>> 8) & 0xff);
+        this.storeU8TLB(p + 3, hi & 0xff);
+        this.storeU8TLB(p + 4, (lo >>> 24) & 0xff);
+        this.storeU8TLB(p + 5, (lo >>> 16) & 0xff);
+        this.storeU8TLB(p + 6, (lo >>> 8) & 0xff);
+        this.storeU8TLB(p + 7, lo & 0xff);
+        return;
+      }
+      case 0x11: { // COP1
         const rsField = rs; // per MIPS enc, this is fmt/control selector
         // Control transfers and branch-on-c1 implement minimal semantics; arithmetic is NOP
         switch (rsField) {
@@ -746,95 +993,6 @@ export class CPU {
             return;
         }
       }
-      case 0x18: { // DADDI rt, rs, imm (64-bit add immediate with overflow) - modeled as 32-bit ADDI
-        const a = (this.getReg(rs) | 0);
-        const b = (signExtend16(imm) | 0);
-        const r = (a + b) | 0;
-        if (((a ^ r) & (b ^ r)) < 0) {
-          throw new CPUException('Overflow', this.pc >>> 0);
-        }
-        this.setReg(rt, r >>> 0);
-        return;
-      }
-      case 0x19: { // DADDIU rt, rs, imm (64-bit add immediate unsigned) - modeled as 32-bit ADDIU
-        const res = (this.getReg(rs) + (signExtend16(imm) >>> 0)) >>> 0;
-        this.setReg(rt, res);
-        return;
-      }
-      case 0x1a: { // LDL rt, offset(base) - big-endian 64-bit partial load (left)
-        const addr = this.addrCalc(rs, imm);
-        const aligned = addr & ~7;
-        const k = addr & 7;
-        // Merge bytes from left side into rt (simulate 64-bit low word only)
-        let lo = this.getReg(rt) >>> 0;
-        // bytes indices for big-endian 8-byte: [0..7]
-        // LDL loads most significant bytes down to k
-        for (let i = 0; i <= (7 - k); i++) {
-          const byte = this.bus.loadU8(aligned + i);
-          const bitPos = ((i % 4) ^ 3) * 8; // map to low 32 bits position
-          const mask = ~(0xff << bitPos) >>> 0;
-          lo = ((lo & mask) | ((byte & 0xff) << bitPos)) >>> 0;
-        }
-        this.setReg(rt, lo >>> 0);
-        return;
-      }
-      case 0x1b: { // LDR rt, offset(base) - big-endian 64-bit partial load (right)
-        const addr = this.addrCalc(rs, imm);
-        const aligned = addr & ~7;
-        const k = addr & 7;
-        // LDR loads least significant bytes from k..7
-        let lo = this.getReg(rt) >>> 0;
-        for (let i = k; i < 8; i++) {
-          const byte = this.bus.loadU8(aligned + i);
-          const bitPos = ((i % 4) ^ 3) * 8;
-          const mask = ~(0xff << bitPos) >>> 0;
-          lo = ((lo & mask) | ((byte & 0xff) << bitPos)) >>> 0;
-        }
-        this.setReg(rt, lo >>> 0);
-        return;
-      }
-      case 0x2f: { // CACHE - no-op
-        return;
-      }
-      case 0x33: { // PREF - no-op
-        return;
-      }
-      case 0x30: { // LL rt, offset(base) - load linked (modeled as LW + set link)
-        const addr = this.addrCalc(rs, imm) >>> 0;
-        const v = this.bus.loadU32(addr);
-        this.setReg(rt, v >>> 0);
-        this.llValid = true; this.llAddr = addr & ~3;
-        return;
-      }
-      case 0x38: { // SC rt, offset(base) - store conditional (modeled as SW + success=1 when linked)
-        const addr = this.addrCalc(rs, imm) >>> 0;
-        const aligned = addr & ~3;
-        const success = this.llValid && (aligned === this.llAddr);
-        if (success) {
-          const v = this.getReg(rt) >>> 0;
-          this.bus.storeU32(addr, v);
-          this.setReg(rt, 1);
-          this.invalidateLL(addr);
-        } else {
-          this.setReg(rt, 0);
-        }
-        this.llValid = false;
-        return;
-      }
-      case 0x3f: { // SD rt, offset(base) - store doubleword (lower 32 bits only for now)
-        const addr = this.addrCalc(rs, imm) >>> 0;
-        const v = this.getReg(rt) >>> 0;
-        // Store as two 32-bit words big-endian (simulate 64-bit)
-        const aligned = addr & ~7;
-        const k = addr & 7; // alignment within 8-byte
-        // For now, write low 32 bits into the appropriate half depending on k; full SDL/SDR handle partials
-        // Simplified: if aligned to word boundary, write at addr; otherwise write bytes
-        for (let i = 0; i < 4; i++) {
-          this.bus.storeU8(addr + i, (v >>> (24 - i*8)) & 0xff);
-        }
-        this.invalidateLL(addr);
-        return;
-      }
       case 0x10: { // COP0
         const rsField = rs;
         const rdField = rd;
@@ -845,7 +1003,7 @@ export class CPU {
           case 0x04: // MTC0 rt, rd
             this.cop0.write(rdField, this.getReg(rt));
             return;
-          case 0x10: { // COP0 rfe/eret group; check funct
+          case 0x10: { // COP0 function group (TLB ops, ERET, etc.)
             const functField = instr & 0x3f;
             if (functField === 0x18) { // ERET
               // If not in exception level, raise reserved instruction
@@ -862,20 +1020,205 @@ export class CPU {
               this.pc = epc >>> 0;
               return;
             }
-            throw new Error(`Unimplemented COP0 rs=0x10 funct=0x${functField.toString(16)}`);
-          }
+            // Implement TLB ops
+            switch (functField) {
+              case 0x01: { // TLBR - read indexed entry into CP0 regs
+                const idx = (this.cop0.read(0) >>> 0) & 0x3f;
+                const e = this.tlb[idx % CPU.TLB_SIZE]!;
+                // Assemble EntryHi, EntryLo0/1, PageMask
+                const entryHi = (((e.vpn2 << 13) >>> 0) | (e.asid & 0xff)) >>> 0;
+                this.cop0.write(10, entryHi);
+                const loBits = (pfn: number, v: boolean, d: boolean, g: boolean) => (((pfn & 0xFFFFF) << 6) | ((0 /*C*/ & 0x7) << 3) | ((d?1:0) << 2) | ((v?1:0) << 1) | (g?1:0)) >>> 0;
+                this.cop0.write(2, loBits(e.pfn0, e.v0, e.d0, e.g));
+                this.cop0.write(3, loBits(e.pfn1, e.v1, e.d1, e.g));
+                this.cop0.write(5, e.mask >>> 0);
+                return;
+              }
+              case 0x02: { // TLBWI - write indexed entry from CP0 regs
+                const idx = (this.cop0.read(0) >>> 0) & 0x3f;
+                this.writeTLBEntry(idx % CPU.TLB_SIZE);
+                return;
+              }
+              case 0x06: { // TLBWR - write random entry
+                const idx = this.tlbRandom % CPU.TLB_SIZE;
+                this.writeTLBEntry(idx);
+                return;
+              }
+              case 0x08: { // TLBP - probe, set Index to match or high bit if not found
+                const hi = this.cop0.read(10) >>> 0;
+                const asid = hi & 0xff; const vpn2 = (hi >>> 13) >>> 0;
+                let found = -1;
+                for (let i = 0; i < CPU.TLB_SIZE; i++) {
+                  const e = this.tlb[i]!;
+                  if (e.vpn2 === vpn2 && (e.g || e.asid === asid)) { found = i; break; }
+                }
+                if (found >= 0) this.cop0.write(0, found >>> 0);
+                else this.cop0.write(0, (1 << 31) >>> 0);
+                return;
+              }
           default:
-            throw new Error(`Unimplemented COP0 rs=0x${rsField.toString(16)}`);
+            // Stubs for other COP0 function ops
+            return;
+          }
         }
+        default:
+          // Treat unimplemented COP0 variants as ReservedInstruction (or skip in fastboot)
+          if (this.fastbootSkipReserved) return;
+          throw new CPUException('ReservedInstruction', this.pc >>> 0);
+      }
+    }
+      case 0x18: { // DADDI rt, rs, imm (64-bit add immediate with overflow) - modeled as 32-bit ADDI
+        const a = (this.getReg(rs) | 0);
+        const b = (signExtend16(imm) | 0);
+        const r = (a + b) | 0;
+        if (((a ^ r) & (b ^ r)) < 0) {
+          throw new CPUException('Overflow', this.pc >>> 0);
+        }
+        this.setReg(rt, r >>> 0);
+        return;
+      }
+      case 0x19: { // DADDIU rt, rs, imm (64-bit add immediate unsigned) - modeled as 32-bit ADDIU
+        const res = (this.getReg(rs) + (signExtend16(imm) >>> 0)) >>> 0;
+        this.setReg(rt, res);
+        return;
+      }
+      case 0x1a: { // LDL rt, offset(base) - big-endian 64-bit partial load (left)
+        const addr = this.addrCalc(rs, imm) >>> 0;
+        const p = addr & ~7; const k = addr & 7;
+        // Merge into existing 64-bit register
+        let hi = this.getRegHi(rt) >>> 0;
+        let lo = this.getReg(rt) >>> 0;
+        const bytes = new Uint8Array(8);
+        // compose current value into bytes 0..7 (big-endian)
+        bytes[0] = (hi >>> 24) & 0xff; bytes[1] = (hi >>> 16) & 0xff; bytes[2] = (hi >>> 8) & 0xff; bytes[3] = hi & 0xff;
+        bytes[4] = (lo >>> 24) & 0xff; bytes[5] = (lo >>> 16) & 0xff; bytes[6] = (lo >>> 8) & 0xff; bytes[7] = lo & 0xff;
+        // replace left bytes 0..(7-k)
+        for (let i = 0; i <= (7 - k); i++) bytes[i] = this.loadU8TLB(p + i) & 0xff;
+        const hiN = ((bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3]) >>> 0;
+        const loN = ((bytes[4] << 24) | (bytes[5] << 16) | (bytes[6] << 8) | bytes[7]) >>> 0;
+        this.setReg64(rt, hiN, loN);
+        return;
+      }
+      case 0x1b: { // LDR rt, offset(base) - big-endian 64-bit partial load (right)
+        const addr = this.addrCalc(rs, imm) >>> 0;
+        const p = addr & ~7; const k = addr & 7;
+        let hi = this.getRegHi(rt) >>> 0;
+        let lo = this.getReg(rt) >>> 0;
+        const bytes = new Uint8Array(8);
+        bytes[0] = (hi >>> 24) & 0xff; bytes[1] = (hi >>> 16) & 0xff; bytes[2] = (hi >>> 8) & 0xff; bytes[3] = hi & 0xff;
+        bytes[4] = (lo >>> 24) & 0xff; bytes[5] = (lo >>> 16) & 0xff; bytes[6] = (lo >>> 8) & 0xff; bytes[7] = lo & 0xff;
+        for (let i = k; i < 8; i++) bytes[i] = this.loadU8TLB(p + i) & 0xff;
+        const hiN = ((bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3]) >>> 0;
+        const loN = ((bytes[4] << 24) | (bytes[5] << 16) | (bytes[6] << 8) | bytes[7]) >>> 0;
+        this.setReg64(rt, hiN, loN);
+        return;
+      }
+      case 0x2f: { // CACHE - no-op
+        return;
+      }
+      case 0x33: { // PREF - no-op
+        return;
+      }
+      case 0x30: { // LL rt, offset(base) - load linked (modeled as LW + set link)
+        const addr = this.addrCalc(rs, imm) >>> 0;
+        const v = this.loadU32TLB(addr);
+        this.setReg(rt, v >>> 0);
+        this.llValid = true; this.llAddr = addr & ~3;
+        return;
+      }
+      case 0x38: { // SC rt, offset(base) - store conditional (modeled as SW + success=1 when linked)
+        const addr = this.addrCalc(rs, imm) >>> 0;
+        const aligned = addr & ~3;
+        const success = this.llValid && (aligned === this.llAddr);
+        if (success) {
+          const v = this.getReg(rt) >>> 0;
+          this.storeU32TLB(addr, v);
+          this.setReg(rt, 1);
+        } else {
+          this.setReg(rt, 0);
+        }
+        this.llValid = false;
+        return;
+      }
+      case 0x3f: { // SD rt, offset(base) - store doubleword
+        const addr = this.addrCalc(rs, imm) >>> 0;
+        const p = addr & ~7;
+        const hi = this.getRegHi(rt) >>> 0;
+        const lo = this.getReg(rt) >>> 0;
+        const b0 = (hi >>> 24) & 0xff, b1 = (hi >>> 16) & 0xff, b2 = (hi >>> 8) & 0xff, b3 = hi & 0xff;
+        const b4 = (lo >>> 24) & 0xff, b5 = (lo >>> 16) & 0xff, b6 = (lo >>> 8) & 0xff, b7 = lo & 0xff;
+        this.storeU8TLB(p + 0, b0); this.storeU8TLB(p + 1, b1); this.storeU8TLB(p + 2, b2); this.storeU8TLB(p + 3, b3);
+        this.storeU8TLB(p + 4, b4); this.storeU8TLB(p + 5, b5); this.storeU8TLB(p + 6, b6); this.storeU8TLB(p + 7, b7);
+        return;
+      }
+      case 0x37: { // LD rt, offset(base) - load doubleword
+        const addr = this.addrCalc(rs, imm) >>> 0;
+        this.checkAlign(addr, 8, false);
+        const p = addr & ~7;
+        const b0 = this.loadU8TLB(p + 0) & 0xff;
+        const b1 = this.loadU8TLB(p + 1) & 0xff;
+        const b2 = this.loadU8TLB(p + 2) & 0xff;
+        const b3 = this.loadU8TLB(p + 3) & 0xff;
+        const b4 = this.loadU8TLB(p + 4) & 0xff;
+        const b5 = this.loadU8TLB(p + 5) & 0xff;
+        const b6 = this.loadU8TLB(p + 6) & 0xff;
+        const b7 = this.loadU8TLB(p + 7) & 0xff;
+        const hi = ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) >>> 0;
+        const lo = ((b4 << 24) | (b5 << 16) | (b6 << 8) | b7) >>> 0;
+        this.setReg64(rt, hi, lo);
+        return;
+      }
+      case 0x2c: { // SDL rt, offset(base) - store doubleword left (big-endian)
+        const addr = this.addrCalc(rs, imm) >>> 0;
+        const p = addr & ~7; const k = addr & 7;
+        const hi = this.getRegHi(rt) >>> 0; const lo = this.getReg(rt) >>> 0;
+        const bytes = [ (hi>>>24)&0xff, (hi>>>16)&0xff, (hi>>>8)&0xff, hi&0xff, (lo>>>24)&0xff, (lo>>>16)&0xff, (lo>>>8)&0xff, lo&0xff ];
+        for (let i = 0; i <= (7 - k); i++) this.storeU8TLB(p + i, (bytes[i] as number) & 0xff);
+        this.invalidateLL(addr);
+        return;
+      }
+      case 0x2d: { // SDR rt, offset(base) - store doubleword right (big-endian)
+        const addr = this.addrCalc(rs, imm) >>> 0;
+        const p = addr & ~7; const k = addr & 7;
+        const hi = this.getRegHi(rt) >>> 0; const lo = this.getReg(rt) >>> 0;
+        const bytes = [ (hi>>>24)&0xff, (hi>>>16)&0xff, (hi>>>8)&0xff, hi&0xff, (lo>>>24)&0xff, (lo>>>16)&0xff, (lo>>>8)&0xff, lo&0xff ];
+        for (let i = k; i < 8; i++) this.storeU8TLB(p + i, (bytes[i] as number) & 0xff);
+        this.invalidateLL(addr);
+        return;
       }
       default:
-        throw new Error(`Unimplemented opcode=0x${op.toString(16)} instr=0x${instr.toString(16)}`);
+        // Unknown major opcode -> ReservedInstruction exception (or skip in fastboot)
+        if (this.fastbootSkipReserved) return;
+        throw new CPUException('ReservedInstruction', this.pc >>> 0);
     }
   }
 
   private invalidateLL(addr: number): void {
     const aligned = (addr >>> 0) & ~3;
     if (this.llValid && this.llAddr === aligned) this.llValid = false;
+  }
+
+  private writeTLBEntry(idx: number): void {
+    const mask = this.cop0.read(5) >>> 0; // PageMask
+    const entryHi = this.cop0.read(10) >>> 0;
+    const lo0 = this.cop0.read(2) >>> 0;
+    const lo1 = this.cop0.read(3) >>> 0;
+    const vpn2 = (entryHi >>> 13) >>> 0;
+    const asid = entryHi & 0xff;
+    const decodeLo = (lo: number) => {
+      const pfn = (lo >>> 6) & 0xFFFFF;
+      const c = (lo >>> 3) & 0x7; // unused
+      const d = ((lo >>> 2) & 1) !== 0;
+      const v = ((lo >>> 1) & 1) !== 0;
+      const g = (lo & 1) !== 0;
+      return { pfn, c, d, v, g };
+    };
+    const a0 = decodeLo(lo0);
+    const a1 = decodeLo(lo1);
+    const g = a0.g && a1.g;
+    const e = this.tlb[idx]!;
+    e.mask = mask >>> 0; e.vpn2 = vpn2 >>> 0; e.asid = asid >>> 0; e.g = g;
+    e.pfn0 = a0.pfn >>> 0; e.pfn1 = a1.pfn >>> 0; e.v0 = a0.v; e.d0 = a0.d; e.v1 = a1.v; e.d1 = a1.d;
   }
 }
 

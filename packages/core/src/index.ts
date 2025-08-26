@@ -19,10 +19,12 @@ export { scheduleDPDrivenTitleFramesAndRun, scheduleSPDPDrivenTitleFramesAndRun 
 export { runSM64TitleDemoDP, runSM64TitleDemoSPDP } from './boot/title_sm64_demo.js';
 export { scheduleAndRunTitleDL, scheduleSPTaskAndRunDL } from './boot/title_dl_hle.js';
 export { writeSM64TitleTasksToRDRAM, scheduleSPTitleTasksFromRDRAMAndRun } from './boot/sp_task_hle.js';
-export { writeRSPTitleDLsToRDRAM, scheduleRSPDLFramesAndRun, scheduleRSPDLFromTableAndRun, scheduleF3DEXFromTableAndRun } from './boot/rsp_dl_hle.js';
+export { writeRSPTitleDLsToRDRAM, scheduleRSPDLFramesAndRun, scheduleRSPDLFromTableAndRun, scheduleF3DEXFromTableAndRun, translateF3DEXAndExecNow } from './boot/rsp_dl_hle.js';
 export { ucToRspdlWords, writeUcAsRspdl } from './boot/ucode_translator.js';
 export { f3dToUc } from './boot/f3d_translator.js';
 export { translateF3DEXToUc } from './boot/f3dex_translator.js';
 export { readControllerState } from './input/input.js';
 export { decompressMIO0 } from './utils/mio0.js';
+// Re-export selected MMIO constants for headless tooling and tests
+export { PI_BASE, PI_STATUS_OFF, PI_STATUS_DMA_BUSY } from './devices/mmio.js';
 

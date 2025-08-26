@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { Bus, RDRAM, CPU, System, runSM64TitleDemoDP, runSM64TitleDemoSPDP, writeSM64TitleTasksToRDRAM, scheduleSPTitleTasksFromRDRAMAndRun, writeRSPTitleDLsToRDRAM, scheduleRSPDLFramesAndRun, writeUcAsRspdl, f3dToUc, scheduleRSPDLFromTableAndRun, scheduleF3DEXFromTableAndRun, hlePiLoadSegments, decompressMIO0, viScanout } from '@n64/core';
+import { Bus, RDRAM, CPU, System, runSM64TitleDemoDP, runSM64TitleDemoSPDP, writeSM64TitleTasksToRDRAM, scheduleSPTitleTasksFromRDRAMAndRun, writeRSPTitleDLsToRDRAM, scheduleRSPDLFramesAndRun, writeUcAsRspdl, f3dToUc, scheduleRSPDLFromTableAndRun, scheduleF3DEXFromTableAndRun, translateF3DEXAndExecNow, hlePiLoadSegments, decompressMIO0, viScanout, PI_BASE, PI_STATUS_OFF, PI_STATUS_DMA_BUSY, hlePifControllerStatus, hlePifReadControllerState } from '@n64/core';
+import { crc32 } from './lib.js';
 
 function parseNum(val: string | undefined, def: number): number {
   if (val === undefined) return def;
@@ -9,19 +10,6 @@ function parseNum(val: string | undefined, def: number): number {
   return Number.isFinite(n) ? (n >>> 0) : def;
 }
 
-function crc32(data: Uint8Array): string {
-  let crc = 0xFFFFFFFF >>> 0;
-  for (let i = 0; i < data.length; i++) {
-    let c = (crc ^ data[i]!) & 0xFF;
-    for (let k = 0; k < 8; k++) {
-      const mask = -(c & 1);
-      c = (c >>> 1) ^ (0xEDB88320 & mask);
-    }
-    crc = (crc >>> 8) ^ c;
-  }
-  crc = (~crc) >>> 0;
-  return (crc >>> 0).toString(16).padStart(8, '0');
-}
 
 async function maybeWriteImage(out: Uint8Array, w: number, h: number, filePath?: string) {
   if (!filePath) return;
@@ -72,8 +60,10 @@ function printUsage() {
   n64-headless f3d-run-table <config.json> [--snapshot path.png]
   n64-headless f3dex-run-table <config.json> [--snapshot path.png]
    n64-headless f3dex-rom-run <config.json> [--snapshot path.png]
-   n64-headless sm64-rom-title <config.json> [--snapshot path.png]
+  n64-headless sm64-rom-title <config.json> [--snapshot path.png]
    n64-headless rom-boot-run <rom.z64> [--cycles N] [--vi-interval CYC] [--width W] [--height H] [--snapshot path.png]
+     [--discover] [--boot path.json] [--bridge] [--bridge-any] [--bridge-log] [--ipl-hle] [--jump-header]
+     [--vi-init] [--fastboot-hle]
  
  Examples:
    n64-headless sm64-demo --frames 1
@@ -869,9 +859,25 @@ async function runRomBootRun(args: string[]) {
   const bootPath = opts['boot'];
   const bootOut = opts['boot-out'];
   const iplHle = Object.prototype.hasOwnProperty.call(opts, 'ipl-hle');
+  const bridge = Object.prototype.hasOwnProperty.call(opts, 'bridge');
+  const bridgeTest = Object.prototype.hasOwnProperty.call(opts, 'bridge-test');
+  const viInit = Object.prototype.hasOwnProperty.call(opts, 'vi-init');
+  const fastbootHle = Object.prototype.hasOwnProperty.call(opts, 'fastboot-hle');
   const iplCart = parseNum(opts['ipl-cart'], 0);
   const iplLen = parseNum(opts['ipl-len'], 2 * 1024 * 1024);
   const traceBoot = parseNum(opts['trace-boot'], 0);
+  const jumpHeader = Object.prototype.hasOwnProperty.call(opts, 'jump-header');
+  // Manual pre-staging flags
+  const stageCartOpt = opts['stage-cart'] ? parseNum(opts['stage-cart'], 0) >>> 0 : null;
+  const stageLenOpt = opts['stage-len'] ? parseNum(opts['stage-len'], 0) >>> 0 : null;
+  const stageAtOpt = opts['stage-at'] ? parseNum(opts['stage-at'], 0) >>> 0 : null;
+  // Bridge tuning flags
+  const bridgeStagingBaseOpt = opts['bridge-staging-base'] ? parseNum(opts['bridge-staging-base'], 0) >>> 0 : null;
+  const bridgeStrideWordsOpt = opts['bridge-stride-words'] ? parseNum(opts['bridge-stride-words'], 0) >>> 0 : null;
+  const bridgeBgStartOpt = opts['bridge-bg-start'] ? parseNum(opts['bridge-bg-start'], 0) >>> 0 : null;
+  const bridgeBgEndOpt = opts['bridge-bg-end'] ? parseNum(opts['bridge-bg-end'], 0) >>> 0 : null;
+  const bridgeLog = Object.prototype.hasOwnProperty.call(opts, 'bridge-log');
+  const bridgeAny = Object.prototype.hasOwnProperty.call(opts, 'bridge-any');
 
   const fs = await import('node:fs');
   const rom = fs.readFileSync(file);
@@ -887,6 +893,7 @@ async function runRomBootRun(args: string[]) {
   const cpu = new CPU(bus);
   const sys = new System(cpu, bus);
   const trace: { pc: string, instr: string }[] = [];
+  const events: any[] = [];
   if (traceBoot > 0) {
     cpu.onTrace = (pc, instr) => {
       if (trace.length < traceBoot) trace.push({ pc: `0x${pc.toString(16)}`, instr: `0x${instr.toString(16)}` });
@@ -902,6 +909,46 @@ async function runRomBootRun(args: string[]) {
   const { hlePifBoot, hlePiLoadSegments } = await import('@n64/core');
   const boot = hlePifBoot(cpu, bus, new Uint8Array(rom));
 
+  // Optional minimal fastboot HLE: enable CPU interrupts, MI masks, and perform a controller handshake once.
+  if (fastbootHle) {
+    // Enable CPU IE and IM2 (IP2 used for MI)
+    const IE = 1 << 0; const IM2 = 1 << (8 + 2);
+    cpu.cop0.write(12, IE | IM2);
+    // Enable MI masks for SP|SI|VI|PI|DP (bits 0,1,3,4,5)
+    const MI_INTR_MASK_OFF = 0x0c >>> 0;
+    const mask = ((1<<0)|(1<<1)|(1<<3)|(1<<4)|(1<<5)) >>> 0;
+    bus.mi.writeU32(MI_INTR_MASK_OFF, mask);
+    // Enable fastboot reserved-instruction skip so we don't stall on unhandled opcodes early
+    (cpu as any).fastbootSkipReserved = true;
+    // Perform a simple controller status+state handshake at DRAM base to satisfy early input init code paths
+    try {
+      const ctrlBase = 0x2000 >>> 0;
+      hlePifControllerStatus(bus, ctrlBase);
+      hlePifReadControllerState(bus, (ctrlBase + 0x40) >>> 0);
+    } catch {}
+  }
+
+  // Heuristic helpers for ROM-to-RDRAM staging discovery (before stepping)
+  const basePhys = (headerInitialPC >>> 0) - 0x80000000 >>> 0;
+  const looksLikeLUI = (word: number) => ((word >>> 26) & 0x3f) === 0x0f; // opcode 0x0f
+  const looksLikeAddiuSp = (word: number) => (word >>> 16) === 0x27bd; // addiu sp,sp,imm
+  const likelyCodeAtBase = (): boolean => {
+    // Guard against OOB
+    if (basePhys + 8 > bus.rdram.bytes.length) return false;
+    const w0 = be32(bus.rdram.bytes, basePhys);
+    const w1 = be32(bus.rdram.bytes, basePhys + 4);
+    return looksLikeLUI(w0) || looksLikeAddiuSp(w0) || looksLikeLUI(w1) || looksLikeAddiuSp(w1);
+  };
+  const stageSlice = (cartAddr: number, dramAddr: number, length: number) => {
+    const seg = { cartAddr: cartAddr >>> 0, dramAddr: dramAddr >>> 0, length: length >>> 0 };
+    hlePiLoadSegments(bus as any, [seg], true);
+    // Immediately acknowledge any PI interrupt pending caused by staging DMA to avoid
+    // leaving MI pending latched before the program enables and acks it.
+    bus.storeU32(PI_BASE + PI_STATUS_OFF, PI_STATUS_DMA_BUSY >>> 0);
+  };
+  // If IPL-HLE is requested, stage a probe window so the header PC points to code rather than raw header text.
+  // Try the provided --ipl-cart/--ipl-len first; if it doesn't look like code at the header PC, scan candidates.
+
   // Heuristic pre-stage when discovering and no boot script provided:
   if (!bootPath && discover) {
     const basePhys = (headerInitialPC >>> 0) - 0x80000000 >>> 0;
@@ -909,6 +956,21 @@ async function runRomBootRun(args: string[]) {
     if (basePhys + guessLen <= bus.rdram.bytes.length) {
       // Copy a large slice from ROM start to the entrypoint region
       hlePiLoadSegments(bus as any, [ { cartAddr: 0 >>> 0, dramAddr: basePhys >>> 0, length: guessLen >>> 0 } ], true);
+    }
+  }
+
+  // Manual pre-staging when requested
+  if (stageCartOpt !== null && stageLenOpt !== null && stageLenOpt > 0) {
+    const basePhys2 = (headerInitialPC >>> 0) - 0x80000000 >>> 0;
+    const dramTarget = (stageAtOpt ?? basePhys2) >>> 0;
+    const cartSrc = stageCartOpt >>> 0;
+    const len = Math.min(stageLenOpt >>> 0, Math.max(0, rom.length - cartSrc));
+    if (dramTarget + len <= bus.rdram.bytes.length && len > 0) {
+      hlePiLoadSegments(bus as any, [ { cartAddr: cartSrc >>> 0, dramAddr: dramTarget >>> 0, length: len >>> 0 } ], true);
+      if (traceBoot > 0) {
+        // eslint-disable-next-line no-console
+        console.log(`[stage] cart=0x${cartSrc.toString(16)} -> dram=0x${dramTarget.toString(16)} len=0x${len.toString(16)}`);
+      }
     }
   }
 
@@ -933,21 +995,159 @@ async function runRomBootRun(args: string[]) {
   let piReads = 0;
   let viOrigin = bus.vi.origin >>> 0;
   let viWidth = bus.vi.width >>> 0;
+  let viOriginWrites = 0;
+  let viWidthWrites = 0;
+  let viStatusWrites = 0;
   let lastPiDram = 0 >>> 0;
   let lastPiCart = 0 >>> 0;
   const piLoads: { cartAddr: number; dramAddr: number; length: number }[] = [];
+  // MI summary counters
+  let miInitModeWrites = 0;
+  let miIntrMaskWrites = 0;
+  let miIntrWrites = 0;
+  // DP summary counters
+  let dpStatusWrites = 0;
+  let dpIntrAcks = 0;
+  // SP DMA counters
+  let spRdCount = 0;
+  let spWrCount = 0;
+  let spStatusWrites = 0;
+  let spLastStatusVal = 0 >>> 0;
+  // SI 64B transfer counters
+  let siWr64Count = 0;
+  let siRd64Count = 0;
 
   // Track SP DMA and OSTask-like snapshots
   let spMemAddr = 0 >>> 0;
   let spDramAddr = 0 >>> 0;
   const spDmas: { op: 'RD'|'WR'; memAddr: number; dramAddr: number; length: number }[] = [];
   const ostasks: { index: number; memAddr: number; dmas: { op: string; memAddr: string; dramAddr: string; length: string }[]; dmemFirst256Hex: string; task?: any }[] = [];
+  const bridgeCRCs: string[] = [];
+  let bridgeCount = 0;
+  let lastBridgeSnapshotPath: string | null = null;
+
+  // If requested, attach an SP start bridge that translates the current OSTask DL to a rendered frame immediately.
+  if (bridge) {
+    (bus.sp as any).onStart = () => {
+      try {
+        const dmemSlice = (bus.sp as any).dmem as Uint8Array;
+        const be32 = (arr: Uint8Array, off: number) => (((arr[off]! << 24) | (arr[off+1]! << 16) | (arr[off+2]! << 8) | (arr[off+3]!)) >>> 0);
+        const taskType = be32(dmemSlice, 0x00) >>> 0;
+        const data_ptr = be32(dmemSlice, 0x30) >>> 0;
+        if (!bridgeAny && taskType !== 1) {
+          if (bridgeLog) console.log(`[bridge] skip task type=0x${taskType.toString(16)} data_ptr=0x${data_ptr.toString(16)}`);
+          return;
+        }
+        if (data_ptr >>> 0) {
+          const fbBytes = (width * height * 2) >>> 0;
+          let fbOrigin = (viOrigin >>> 0);
+          if (fbOrigin === 0) {
+            // If the ROM hasn't programmed VI yet, initialize it so HLE rendering is visible.
+            fbOrigin = 0xF000 >>> 0;
+            (bus.vi as any).writeU32(0x14, fbOrigin >>> 0); // VI_ORIGIN_OFF
+            (bus.vi as any).writeU32(0x18, width >>> 0);    // VI_WIDTH_OFF
+          }
+          const defaultBase = (fbOrigin + fbBytes + 0x30000) >>> 0;
+          const strideWords = (bridgeStrideWordsOpt ?? (0x400 >>> 2)) >>> 0;
+          const strideBytes = (strideWords * 4) >>> 0;
+          const stagingBase = (bridgeStagingBaseOpt ?? (defaultBase + ((bridgeCount & 0xff) * Math.max(0x2000, strideBytes)) >>> 0)) >>> 0;
+          // Optional background gradient for bridge
+          const bgStart = bridgeBgStartOpt ?? undefined;
+          const bgEnd = bridgeBgEndOpt ?? undefined;
+          translateF3DEXAndExecNow(bus, width, height, data_ptr >>> 0, stagingBase >>> 0, strideWords >>> 0, bgStart, bgEnd);
+          const img = viScanout(bus, width, height);
+          const c = crc32(img);
+          if (bridgeLog) {
+            // eslint-disable-next-line no-console
+            console.log(`[bridge] dl=0x${(data_ptr>>>0).toString(16)} staging=0x${stagingBase.toString(16)} strideWords=${strideWords} crc=${c}`);
+          }
+          bridgeCRCs.push(c);
+          if (snapshot) {
+            const extMatch = snapshot.match(/\.(png|ppm)$/i);
+            const ext = extMatch ? extMatch[0] : '.png';
+            const basePath = snapshot.replace(/\.(png|ppm)$/i, '');
+            const outPath = `${basePath}_bridge${bridgeCount}${ext}`;
+            lastBridgeSnapshotPath = outPath;
+            void maybeWriteImage(img, width, height, outPath);
+          }
+          bridgeCount++;
+        }
+      } catch {}
+    };
+  }
 
   const spWrite = bus.sp.writeU32.bind(bus.sp) as (off: number, val: number) => void;
   (bus.sp as any).writeU32 = (off: number, val: number) => {
     const o = off >>> 0; const v = val >>> 0;
+    if (traceBoot>0) {
+      let reg = `0x${o.toString(16)}`;
+      if (o === 0x00) reg = 'MEM_ADDR';
+      else if (o === 0x04) reg = 'DRAM_ADDR';
+      else if (o === 0x08) reg = 'RD_LEN';
+      else if (o === 0x0c) reg = 'WR_LEN';
+      else if (o === 0x10) reg = 'STATUS';
+      events.push({ type:'sp', reg, val:`0x${v.toString(16)}`, cyc: sys.cycle });
+    }
     if (o === 0x00) {
-      if ((v & 0x1) !== 0 && v === 1) {
+      // SP_MEM_ADDR (also used as START when value==1 in our stub)
+      if (v === 1) {
+        spStarts++;
+        const dmemSlice = (bus.sp as any).dmem as Uint8Array;
+        let task: any | undefined = undefined;
+        try {
+          const tOff = 0;
+          const type = be32(dmemSlice, tOff + 0x00);
+          const flags = be32(dmemSlice, tOff + 0x04);
+          const ucode_boot = be32(dmemSlice, tOff + 0x08);
+          const ucode_boot_size = be32(dmemSlice, tOff + 0x0C);
+          const ucode = be32(dmemSlice, tOff + 0x10);
+          const ucode_size = be32(dmemSlice, tOff + 0x14);
+          const ucode_data = be32(dmemSlice, tOff + 0x18);
+          const ucode_data_size = be32(dmemSlice, tOff + 0x1C);
+          const dram_stack = be32(dmemSlice, tOff + 0x20);
+          const dram_stack_size = be32(dmemSlice, tOff + 0x24);
+          const output_buff = be32(dmemSlice, tOff + 0x28);
+          const output_buff_size = be32(dmemSlice, tOff + 0x2C);
+          const data_ptr = be32(dmemSlice, tOff + 0x30);
+          const data_size = be32(dmemSlice, tOff + 0x34);
+          const yield_data_ptr = be32(dmemSlice, tOff + 0x38);
+          const yield_data_size = be32(dmemSlice, tOff + 0x3C);
+          const fields = { type, flags, ucode_boot, ucode_boot_size, ucode, ucode_size, ucode_data, ucode_data_size, dram_stack, dram_stack_size, output_buff, output_buff_size, data_ptr, data_size, yield_data_ptr, yield_data_size } as const;
+          const anyNonZero = Object.values(fields).some(v => (v >>> 0) !== 0);
+          if (anyNonZero) task = Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, `0x${(v>>>0).toString(16)}`]));
+        } catch {}
+        const snap = {
+          index: spStarts >>> 0,
+          memAddr: spMemAddr >>> 0,
+          dmas: spDmas.slice(-8).map(d => ({
+            op: d.op,
+            memAddr: `0x${(d.memAddr>>>0).toString(16)}`,
+            dramAddr: `0x${(d.dramAddr>>>0).toString(16)}`,
+            length: `0x${(d.length>>>0).toString(16)}`,
+          })),
+          dmemFirst256Hex: toHex(dmemSlice.slice(0, 256)),
+          task,
+        };
+        ostasks.push(snap);
+      } else {
+        spMemAddr = v >>> 0;
+      }
+    } else if (o === 0x04) {
+      // SP_DRAM_ADDR
+      spDramAddr = v >>> 0;
+    } else if (o === 0x08) { // SP_RD_LEN
+      const len = ((v & 0x00ffffff) >>> 0) + 1;
+      spDmas.push({ op: 'RD', memAddr: spMemAddr >>> 0, dramAddr: spDramAddr >>> 0, length: len >>> 0 });
+      spRdCount++;
+    } else if (o === 0x0C) { // SP_WR_LEN
+      const len = ((v & 0x00ffffff) >>> 0) + 1;
+      spDmas.push({ op: 'WR', memAddr: spMemAddr >>> 0, dramAddr: spDramAddr >>> 0, length: len >>> 0 });
+      spWrCount++;
+    } else if (o === 0x10) { // SP_STATUS
+      spStatusWrites++;
+      spLastStatusVal = v >>> 0;
+      // When writing bit0=1, HALT is cleared -> start
+      if ((v & 0x1) !== 0) {
         spStarts++;
         // Snapshot a small view of DMEM at start
         const dmemSlice = (bus.sp as any).dmem as Uint8Array;
@@ -971,12 +1171,9 @@ async function runRomBootRun(args: string[]) {
           const data_size = be32(dmemSlice, tOff + 0x34);
           const yield_data_ptr = be32(dmemSlice, tOff + 0x38);
           const yield_data_size = be32(dmemSlice, tOff + 0x3C);
-          // Only include if fields look non-zero reasonably
           const fields = { type, flags, ucode_boot, ucode_boot_size, ucode, ucode_size, ucode_data, ucode_data_size, dram_stack, dram_stack_size, output_buff, output_buff_size, data_ptr, data_size, yield_data_ptr, yield_data_size } as const;
           const anyNonZero = Object.values(fields).some(v => (v >>> 0) !== 0);
-          if (anyNonZero) {
-            task = Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, `0x${(v>>>0).toString(16)}`]));
-          }
+          if (anyNonZero) task = Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, `0x${(v>>>0).toString(16)}`]));
         } catch {}
         const snap = {
           index: spStarts >>> 0,
@@ -991,47 +1188,206 @@ async function runRomBootRun(args: string[]) {
           task,
         };
         ostasks.push(snap);
-      } else {
-        spMemAddr = v >>> 0;
       }
-    } else if (o === 0x04) {
-      spDramAddr = v >>> 0;
-    } else if (o === 0x08) { // SP_RD_LEN
-      const len = ((v & 0x00ffffff) >>> 0) + 1;
-      spDmas.push({ op: 'RD', memAddr: spMemAddr >>> 0, dramAddr: spDramAddr >>> 0, length: len >>> 0 });
-    } else if (o === 0x0C) { // SP_WR_LEN
-      const len = ((v & 0x00ffffff) >>> 0) + 1;
-      spDmas.push({ op: 'WR', memAddr: spMemAddr >>> 0, dramAddr: spDramAddr >>> 0, length: len >>> 0 });
     }
     spWrite(o, v);
   };
+  // Only record PI activity that happens while the CPU is executing (exclude our pre-staging)
+  let monitorActive = false;
   const piWrite = bus.pi.writeU32.bind(bus.pi) as (off: number, val: number) => void;
   (bus.pi as any).writeU32 = (off: number, val: number) => {
     const offU = off >>> 0;
     const valU = val >>> 0;
-    if (offU === 0x00) lastPiDram = valU >>> 0; // PI_DRAM_ADDR
-    if (offU === 0x04) lastPiCart = valU >>> 0; // PI_CART_ADDR
+    if (offU === 0x00) { lastPiDram = valU >>> 0; if (traceBoot>0 && monitorActive) events.push({ type:'pi', reg:'DRAM_ADDR', val:`0x${valU.toString(16)}`, cyc: sys.cycle }); }
+    if (offU === 0x04) { lastPiCart = valU >>> 0; if (traceBoot>0 && monitorActive) events.push({ type:'pi', reg:'CART_ADDR', val:`0x${valU.toString(16)}`, cyc: sys.cycle }); }
     if (offU === 0x08) { // PI_RD_LEN
-      piReads++;
-      const len = ((valU & 0x00ffffff) >>> 0) + 1;
-      piLoads.push({ cartAddr: lastPiCart >>> 0, dramAddr: lastPiDram >>> 0, length: len >>> 0 });
+      if (monitorActive) {
+        piReads++;
+        const len = ((valU & 0x00ffffff) >>> 0) + 1;
+        piLoads.push({ cartAddr: lastPiCart >>> 0, dramAddr: lastPiDram >>> 0, length: len >>> 0 });
+        if (traceBoot>0) events.push({ type:'pi', reg:'RD_LEN', val:`0x${valU.toString(16)}`, cart:`0x${lastPiCart.toString(16)}`, dram:`0x${lastPiDram.toString(16)}`, len:`0x${len.toString(16)}`, cyc: sys.cycle });
+      }
+      // Schedule a short-latency DMA completion so ROM doesn't stall on IO busy/interrupts.
+      const when = (sys.cycle + 64) >>> 0;
+      sys.scheduleAt(when, () => {
+        bus.pi.completeDMA();
+        if (traceBoot>0 && monitorActive) events.push({ type:'pi', reg:'AUTO_COMPLETE_DMA', cart:`0x${lastPiCart.toString(16)}`, dram:`0x${lastPiDram.toString(16)}`, len:`0x${(((valU & 0x00ffffff)>>>0)+1).toString(16)}`, cyc: sys.cycle });
+      });
     }
+    if (offU === 0x0C) { // PI_WR_LEN
+      // Mirror behavior: schedule completion
+      const len = ((valU & 0x00ffffff) >>> 0) + 1;
+      const when = (sys.cycle + 64) >>> 0;
+      sys.scheduleAt(when, () => {
+        bus.pi.completeDMA();
+        if (traceBoot>0 && monitorActive) events.push({ type:'pi', reg:'AUTO_COMPLETE_DMA_WR', cart:`0x${lastPiCart.toString(16)}`, dram:`0x${lastPiDram.toString(16)}`, len:`0x${len.toString(16)}`, cyc: sys.cycle });
+      });
+      if (traceBoot>0 && monitorActive) events.push({ type:'pi', reg:'WR_LEN', val:`0x${valU.toString(16)}`, cart:`0x${lastPiCart.toString(16)}`, dram:`0x${lastPiDram.toString(16)}`, len:`0x${len.toString(16)}`, cyc: sys.cycle });
+    }
+    if (offU === 0x10 && traceBoot>0 && monitorActive) events.push({ type:'pi', reg:'STATUS', val:`0x${valU.toString(16)}`, cyc: sys.cycle });
     piWrite(offU, valU);
   };
   const viWrite = bus.vi.writeU32.bind(bus.vi) as (off: number, val: number) => void;
   (bus.vi as any).writeU32 = (off: number, val: number) => {
     viWrite(off, val >>> 0);
-    // Mirror public fields for convenience
-    if ((off >>> 0) === 0x14) viOrigin = val >>> 0; // VI_ORIGIN_OFF
-    if ((off >>> 0) === 0x18) viWidth = val >>> 0;  // VI_WIDTH_OFF
+    // Mirror public fields for convenience and accept both legacy and real offsets
+    const o = (off >>> 0);
+    if (o === 0x00 || o === 0x10) { if (monitorActive) viStatusWrites++; if (traceBoot>0 && monitorActive) events.push({ type:'vi', reg:'STATUS', val:`0x${(val>>>0).toString(16)}`, cyc: sys.cycle }); }
+    if (o === 0x14 || o === 0x04) { viOrigin = val >>> 0; if (monitorActive) viOriginWrites++; if (traceBoot>0 && monitorActive) events.push({ type:'vi', reg:'ORIGIN', val:`0x${(val>>>0).toString(16)}`, cyc: sys.cycle }); }
+    if (o === 0x18 || o === 0x08) { viWidth = val >>> 0;  if (monitorActive) viWidthWrites++; if (traceBoot>0 && monitorActive) events.push({ type:'vi', reg:'WIDTH', val:`0x${(val>>>0).toString(16)}`, cyc: sys.cycle }); }
+  };
+  const dpWrite = bus.dp.writeU32.bind(bus.dp) as (off: number, val: number) => void;
+  (bus.dp as any).writeU32 = (off: number, val: number) => {
+    const o = off >>> 0, v = val >>> 0;
+    if (o === 0x10) {
+      if (monitorActive) dpStatusWrites++;
+      if ((v & 0x1) !== 0 && monitorActive) dpIntrAcks++;
+      if (traceBoot>0 && monitorActive) events.push({ type:'dp', reg:'STATUS', val:`0x${v.toString(16)}`, cyc: sys.cycle });
+    }
+    dpWrite(o, v);
+  };
+  // SI instrumentation
+  const siWrite = bus.si.writeU32.bind(bus.si) as (off: number, val: number) => void;
+  (bus.si as any).writeU32 = (off: number, val: number) => {
+    const o = off >>> 0, v = val >>> 0;
+    if (o === 0x10) { if (monitorActive) siWr64Count++; if (traceBoot>0 && monitorActive) events.push({ type:'si', reg:'PIF_ADDR_WR64B', val:`0x${v.toString(16)}`, cyc: sys.cycle }); }
+    if (o === 0x04) { if (monitorActive) siRd64Count++; if (traceBoot>0 && monitorActive) events.push({ type:'si', reg:'PIF_ADDR_RD64B', val:`0x${v.toString(16)}`, cyc: sys.cycle }); }
+    if (o === 0x18 && traceBoot>0 && monitorActive) events.push({ type:'si', reg:'STATUS', val:`0x${v.toString(16)}`, cyc: sys.cycle });
+    siWrite(o, v);
+  };
+  const miWrite = bus.mi.writeU32.bind(bus.mi) as (off: number, val: number) => void;
+  (bus.mi as any).writeU32 = (off: number, val: number) => {
+    const o = off >>> 0; const v = val >>> 0;
+    if (monitorActive) {
+      if (o === 0x00) miInitModeWrites++;
+      else if (o === 0x08) miIntrWrites++;
+      else if (o === 0x0c) miIntrMaskWrites++;
+    }
+    if (traceBoot>0 && monitorActive) {
+      let reg = `0x${o.toString(16)}`;
+      if (o === 0x00) reg = 'INIT_MODE';
+      else if (o === 0x08) reg = 'INTR';
+      else if (o === 0x0c) reg = 'INTR_MASK';
+      events.push({ type:'mi', reg, val:`0x${v.toString(16)}`, cyc: sys.cycle });
+    }
+    miWrite(o, v);
   };
 
-  // Optional IPL-HLE pre-staging now that PI writes are instrumented
+  // RI instrumentation: auto-clear RI_MODE shortly after write to simulate RDRAM init complete
+  const riWrite = bus.ri.writeU32.bind(bus.ri) as (off: number, val: number) => void;
+  (bus.ri as any).writeU32 = (off: number, val: number) => {
+    const o = off >>> 0; const v = val >>> 0;
+    if (traceBoot>0) events.push({ type:'ri', reg:`0x${o.toString(16)}`, val:`0x${v.toString(16)}`, cyc: sys.cycle });
+    riWrite(o, v);
+    if (o === 0x00) {
+      const when = (sys.cycle + 256) >>> 0;
+      sys.scheduleAt(when, () => {
+        (bus.ri as any).mode = 0 >>> 0;
+        if (traceBoot>0) events.push({ type:'ri', reg:'MODE_AUTO_CLEAR', val:'0x0', cyc: sys.cycle });
+      });
+    }
+  };
+
+  // Optional IPL-HLE pre-staging with discovery before stepping
   let ipl: undefined | { cartAddr: string; dramAddr: string; length: string } = undefined;
   if (iplHle) {
-    const { hleIplStage } = await import('@n64/core');
-    const res = hleIplStage(bus, new Uint8Array(rom), { initialPC: headerInitialPC >>> 0, cartStart: iplCart >>> 0, length: iplLen >>> 0 });
-    ipl = { cartAddr: `0x${(res.cartAddr>>>0).toString(16)}`, dramAddr: `0x${(res.dramAddr>>>0).toString(16)}`, length: `0x${(res.length>>>0).toString(16)}` };
+    // Temporarily stage the requested window
+    const probeLen = Math.min(iplLen >>> 0, 256 * 1024) >>> 0; // start with 256 KiB probe
+    stageSlice(iplCart >>> 0, basePhys >>> 0, probeLen >>> 0);
+    // If the header PC doesn't look like code, scan candidates on 0x1000 boundaries up to 8 MiB
+    if (!likelyCodeAtBase()) {
+      let found: number | null = null;
+      const maxScan = Math.min(rom.length >>> 0, 8 * 1024 * 1024);
+      for (let off = 0; off < maxScan; off += 0x1000) {
+        stageSlice(off >>> 0, basePhys >>> 0, Math.min(0x10000, maxScan - off) >>> 0); // 64 KiB probe per candidate
+        if (likelyCodeAtBase()) { found = off >>> 0; break; }
+      }
+      const chosen = (found ?? (iplCart >>> 0)) >>> 0;
+      const bigLen = Math.min(iplLen >>> 0, Math.max(0x200000, Math.min(rom.length - chosen, 6 * 1024 * 1024))) >>> 0; // up to 6 MiB
+      stageSlice(chosen >>> 0, basePhys >>> 0, bigLen >>> 0);
+      ipl = { cartAddr: `0x${chosen.toString(16)}`, dramAddr: `0x${(basePhys>>>0).toString(16)}`, length: `0x${bigLen.toString(16)}` };
+    } else {
+      // Good first guess; stage full requested window
+      const bigLen = Math.min(iplLen >>> 0, Math.max(0x200000, Math.min(rom.length - (iplCart>>>0), 6 * 1024 * 1024))) >>> 0;
+      stageSlice(iplCart >>> 0, basePhys >>> 0, bigLen >>> 0);
+      ipl = { cartAddr: `0x${(iplCart>>>0).toString(16)}`, dramAddr: `0x${(basePhys>>>0).toString(16)}`, length: `0x${bigLen.toString(16)}` };
+    }
+  }
+  // Optionally jump PC directly to header entry after staging (skips IPL loops)
+  let jumpedToHeader = false;
+  if (jumpHeader) {
+    cpu.pc = headerInitialPC >>> 0;
+    jumpedToHeader = true;
+  }
+
+  // Optional bridge test injection: stage a tiny F3DEX DL and trigger SP start immediately
+  if (bridgeTest) {
+    // Program VI registers so HLE rendering writes land in a visible framebuffer
+    const fbOrigin = 0xF000 >>> 0;
+    (bus.vi as any).writeU32(0x14, fbOrigin >>> 0); // VI_ORIGIN_OFF
+    (bus.vi as any).writeU32(0x18, width >>> 0);    // VI_WIDTH_OFF
+
+    // Reserve a small region after the framebuffer for assets and DL
+    const fbBytes = (width * height * 2) >>> 0;
+    const base = (fbOrigin + fbBytes + 0x20000) >>> 0;
+    const tlutAddr = base >>> 0;
+    const pixAddr = (base + 0x1000) >>> 0;
+    const dlAddr = (base + 0x2000) >>> 0;
+
+    // TLUT: 256 entries, palette index 1 = green
+    const GREEN = ((0 << 11) | (31 << 6) | (0 << 1) | 1) >>> 0;
+    for (let i = 0; i < 256; i++) bus.storeU16((tlutAddr + i * 2) >>> 0, i === 1 ? GREEN : 0);
+
+    // CI8 texture 16x16 filled with index 1
+    const TW = 16, TH = 16;
+    for (let y = 0; y < TH; y++) for (let x = 0; x < TW; x++) bus.storeU8((pixAddr + (y * TW + x)) >>> 0, 1);
+
+    // Helper to pack 12-bit fields: upper 12 (ulx) and lower 12 (uly)
+    const pack12 = (hi: number, lo: number) => ((((hi & 0xFFF) << 12) | (lo & 0xFFF)) >>> 0);
+    const fp = (v: number) => ((v * 4) >>> 0); // 10.2 fixed
+
+    let p = dlAddr >>> 0;
+    // G_LOADTLUT (0xF0): w0 low 16 bits = count, w1 = addr
+    bus.storeU32(p, (0xF0 << 24) | (256 & 0xFFFF)); p = (p + 4) >>> 0; bus.storeU32(p, tlutAddr >>> 0); p = (p + 4) >>> 0;
+    // G_SETTIMG (0xFD) with siz=1 (CI8): w1 = pixAddr
+    bus.storeU32(p, ((0xFD << 24) | (1 << 19)) >>> 0); p = (p + 4) >>> 0; bus.storeU32(p, pixAddr >>> 0); p = (p + 4) >>> 0;
+    // G_SETTILESIZE (0xF2): set tile size 16x16
+    bus.storeU32(p, ((0xF2 << 24) | pack12(fp(0), fp(0))) >>> 0); p = (p + 4) >>> 0; bus.storeU32(p, pack12(fp(TW - 1), fp(TH - 1)) >>> 0); p = (p + 4) >>> 0;
+    // G_TEXRECT (0xE4): draw at (20,20)
+    const X = 20, Y = 20; const W = TW, H = TH;
+    bus.storeU32(p, ((0xE4 << 24) | pack12(fp(X), fp(Y))) >>> 0); p = (p + 4) >>> 0; bus.storeU32(p, pack12(fp(X + W), fp(Y + H)) >>> 0); p = (p + 4) >>> 0;
+    // G_ENDDL (0xDF)
+    bus.storeU32(p, (0xDF << 24) >>> 0); p = (p + 4) >>> 0; bus.storeU32(p, 0); p = (p + 4) >>> 0;
+
+    // Write a minimal OSTask header into SP DMEM at 0x00 with data_ptr at 0x30
+    const dmem = (bus.sp as any).dmem as Uint8Array;
+    const wbe = (arr: Uint8Array, off: number, v: number) => { arr[off] = (v >>> 24) & 0xFF; arr[off+1] = (v >>> 16) & 0xFF; arr[off+2] = (v >>> 8) & 0xFF; arr[off+3] = v & 0xFF; };
+    wbe(dmem, 0x00, 0x00000001); // type = 1 (gfx)
+    wbe(dmem, 0x04, 0x00000000); // flags
+    wbe(dmem, 0x08, 0x00000000); // ucode_boot
+    wbe(dmem, 0x0C, 0x00000000); // ucode_boot_size
+    wbe(dmem, 0x10, 0x00000000); // ucode
+    wbe(dmem, 0x14, 0x00000000); // ucode_size
+    wbe(dmem, 0x18, 0x00000000); // ucode_data
+    wbe(dmem, 0x1C, 0x00000000); // ucode_data_size
+    wbe(dmem, 0x20, 0x00000000); // dram_stack
+    wbe(dmem, 0x24, 0x00000000); // dram_stack_size
+    wbe(dmem, 0x28, 0x00000000); // output_buff
+    wbe(dmem, 0x2C, 0x00000000); // output_buff_size
+    wbe(dmem, 0x30, dlAddr >>> 0); // data_ptr -> our DL
+    wbe(dmem, 0x34, 0x00000000); // data_size
+    wbe(dmem, 0x38, 0x00000000); // yield_data_ptr
+    wbe(dmem, 0x3C, 0x00000000); // yield_data_size
+
+    // Trigger SP start via MEM_ADDR=1 (our stub treats this as start)
+    ;(bus.sp as any).writeU32(0x00, 1 >>> 0);
+  }
+
+  // Optional VI initialization for visibility when the ROM hasn't programmed VI yet.
+  if (viInit) {
+    const fbOrigin = 0xF000 >>> 0;
+    (bus.vi as any).writeU32(0x14, fbOrigin >>> 0); // VI_ORIGIN_OFF
+    (bus.vi as any).writeU32(0x18, width >>> 0);    // VI_WIDTH_OFF
   }
 
   // Schedule periodic VI vblank and snapshot if configured
@@ -1047,9 +1403,12 @@ async function runRomBootRun(args: string[]) {
   // Step CPU for requested cycles; trap errors to report gracefully
   let stopReason: string | null = null;
   try {
+    monitorActive = true;
     sys.stepCycles(cycles);
   } catch (e: any) {
     stopReason = String(e?.message || e);
+  } finally {
+    monitorActive = false;
   }
 
   // If discovering and no PI activity, try multi-window heuristic reattempts
@@ -1104,40 +1463,9 @@ async function runRomBootRun(args: string[]) {
     }
   }
 
-  // If we parsed any OSTask with a plausible data_ptr, attempt an HLE F3DEX bridge to render one frame
-  let bridgeCRC32: string | null = null;
-  let bridgeSnapshotPath: string | null = null;
-  try {
-    const last = [...ostasks].reverse().find(t => t.task && typeof t.task.data_ptr === 'string');
-    if (last && last.task) {
-      const ptrHex: string = last.task.data_ptr;
-      const dlPtr = parseNum(ptrHex, 0) >>> 0;
-      if (dlPtr >>> 0) {
-        // Build a 1-entry table pointing to the DL and run scheduleF3DEXFromTableAndRun for one frame
-        const fbBytes = (width * height * 2) >>> 0;
-        const fbOrigin = (viOrigin >>> 0) || 0xF000;
-        const tableBase = (fbOrigin + fbBytes + 0x20000) >>> 0;
-        const stagingBase = (tableBase + 0x4000) >>> 0;
-        const strideWords = 0x400 >>> 2;
-        bus.storeU32(tableBase, dlPtr >>> 0);
-        const start = 2, interval = 3;
-        const total = start + interval * 1 + 2;
-        const { image: bridgeImg } = scheduleF3DEXFromTableAndRun(
-          cpu, bus, sys, fbOrigin, width, height,
-          tableBase, 1, stagingBase, strideWords,
-          start, interval, total, 1,
-        );
-        bridgeCRC32 = crc32(bridgeImg);
-        if (snapshot) {
-          const extMatch = snapshot.match(/\.(png|ppm)$/i);
-          const ext = extMatch ? extMatch[0] : '.png';
-          const basePath = snapshot.replace(/\.(png|ppm)$/i, '');
-          bridgeSnapshotPath = `${basePath}_bridge${ext}`;
-          await maybeWriteImage(bridgeImg, width, height, bridgeSnapshotPath);
-        }
-      }
-    }
-  } catch {}
+  // Bridge CRC output aggregated from onStart handler
+  const bridgeCRC32: string | null = bridgeCRCs.length ? bridgeCRCs[bridgeCRCs.length - 1]! : null;
+  const bridgeSnapshotPath: string | null = lastBridgeSnapshotPath;
 
   // Write snapshots if requested
   if (snapshot) {
@@ -1174,14 +1502,16 @@ async function runRomBootRun(args: string[]) {
     viInterval,
     frames: frames.length,
     vi: { origin: viOrigin >>> 0, width: viWidth >>> 0 },
-    events: { spStarts, piDmas: piReads },
+    events: { spStarts, spStatusWrites, spLastStatus: `0x${(spLastStatusVal>>>0).toString(16)}`, piDmas: piReads, miInitModeWrites, miIntrWrites, miIntrMaskWrites, viStatusWrites, viOriginWrites, viWidthWrites, dpStatusWrites, dpIntrAcks, spRdDmas: spRdCount, spWrDmas: spWrCount, siWr64: siWr64Count, siRd64: siRd64Count },
     ostasks: ostasks.length ? ostasks : undefined,
     stopReason: stopReason || null,
     snapshot: snapshot || null,
     discovered: discover ? piLoads : undefined,
     bridge: bridgeCRC32 ? { crc32: bridgeCRC32, snapshot: bridgeSnapshotPath } : undefined,
     ipl,
+    jumpedToHeader: jumpedToHeader || undefined,
     trace: traceBoot > 0 ? trace : undefined,
+    deviceEvents: traceBoot > 0 ? events : undefined,
   }, null, 2));
 }
 

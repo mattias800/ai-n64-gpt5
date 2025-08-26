@@ -1,4 +1,4 @@
-export type ExceptionCode = 'AddressErrorLoad' | 'AddressErrorStore' | 'Overflow' | 'Interrupt' | 'Syscall' | 'Breakpoint' | 'ReservedInstruction';
+export type ExceptionCode = 'AddressErrorLoad' | 'AddressErrorStore' | 'Overflow' | 'Interrupt' | 'Syscall' | 'Breakpoint' | 'ReservedInstruction' | 'Trap';
 
 export class CPUException extends Error {
   constructor(public readonly code: ExceptionCode, public readonly badVAddr: number) {
