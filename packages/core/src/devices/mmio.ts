@@ -115,7 +115,11 @@ export class SP extends MMIO {
       case SP_STATUS_OFF: return this.status >>> 0;
       case SP_MEM_ADDR_OFF: return this.memAddr >>> 0;
       case SP_DRAM_ADDR_OFF: return this.dramAddr >>> 0;
-      default: return super.readU32(off);
+      default: {
+        // Treat other offsets within 0x0000..0x0FFF as DMEM memory for CPU fetch/load
+        const o = off & 0x0FFC; // 32-bit aligned within DMEM
+        return (((this.dmem[o]! << 24) | (this.dmem[o + 1]! << 16) | (this.dmem[o + 2]! << 8) | (this.dmem[o + 3]!)) >>> 0);
+      }
     }
   }
   override writeU32(off: number, val: number): void {
@@ -166,7 +170,15 @@ export class SP extends MMIO {
         // Also store value for visibility
         super.writeU32(off, val);
         return;
-      default: super.writeU32(off, val); return;
+      default: {
+        // Writes to other offsets within DMEM write the memory (for completeness)
+        const o = off & 0x0FFF;
+        this.dmem[o] = (val >>> 24) & 0xff;
+        this.dmem[(o + 1) & 0x0FFF] = (val >>> 16) & 0xff;
+        this.dmem[(o + 2) & 0x0FFF] = (val >>> 8) & 0xff;
+        this.dmem[(o + 3) & 0x0FFF] = val & 0xff;
+        return;
+      }
     }
   }
   raiseInterrupt(): void { if (this.mi) this.mi.raise(MI_INTR_SP); }

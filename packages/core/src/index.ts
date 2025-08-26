@@ -4,6 +4,7 @@ export * as bit from './utils/bit.js';
 export { normalizeRomToBigEndian, detectByteOrder } from './rom/byteorder.js';
 export { parseHeader } from './rom/header.js';
 export { hleBoot } from './boot/hle.js';
+export { hlePifBoot } from './boot/pif_boot_hle.js';
 export { hlePiLoadSegments } from './boot/loader.js';
 export { System } from './system/system.js';
 export { viScanout } from './system/video.js';

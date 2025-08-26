@@ -875,6 +875,11 @@ async function runRomBootRun(args: string[]) {
   const fs = await import('node:fs');
   const rom = fs.readFileSync(file);
 
+  // Parse ROM header to obtain the main program initial PC (kseg0)
+  const { normalizeRomToBigEndian, parseHeader } = await import('@n64/core');
+  const { data: beRom } = normalizeRomToBigEndian(new Uint8Array(rom));
+  const headerInitialPC = parseHeader(beRom).initialPC >>> 0;
+
   // Bigger RDRAM so KSEG0 physical addresses are in range
   const rdram = new RDRAM(8 * 1024 * 1024);
   const bus = new Bus(rdram);
@@ -886,12 +891,13 @@ async function runRomBootRun(args: string[]) {
   const be32 = (arr: Uint8Array, off: number) => (((arr[off]! << 24) | (arr[off+1]! << 16) | (arr[off+2]! << 8) | (arr[off+3]!)) >>> 0);
 
   // HLE boot sets PC from header and makes ROM available to PI
-  const { hleBoot, hlePiLoadSegments } = await import('@n64/core');
-  const boot = hleBoot(cpu, bus, new Uint8Array(rom));
+  // Use PIF/IPL3 HLE boot so the ROM's own boot code runs from 0xA4000040
+  const { hlePifBoot, hlePiLoadSegments } = await import('@n64/core');
+  const boot = hlePifBoot(cpu, bus, new Uint8Array(rom));
 
   // Heuristic pre-stage when discovering and no boot script provided:
   if (!bootPath && discover) {
-    const basePhys = (boot.initialPC >>> 0) - 0x80000000 >>> 0;
+    const basePhys = (headerInitialPC >>> 0) - 0x80000000 >>> 0;
     const guessLen = Math.min((rom.length >>> 0), 2 * 1024 * 1024);
     if (basePhys + guessLen <= bus.rdram.bytes.length) {
       // Copy a large slice from ROM start to the entrypoint region
@@ -1017,7 +1023,7 @@ async function runRomBootRun(args: string[]) {
   let ipl: undefined | { cartAddr: string; dramAddr: string; length: string } = undefined;
   if (iplHle) {
     const { hleIplStage } = await import('@n64/core');
-    const res = hleIplStage(bus, new Uint8Array(rom), { initialPC: boot.initialPC >>> 0, cartStart: iplCart >>> 0, length: iplLen >>> 0 });
+    const res = hleIplStage(bus, new Uint8Array(rom), { initialPC: headerInitialPC >>> 0, cartStart: iplCart >>> 0, length: iplLen >>> 0 });
     ipl = { cartAddr: `0x${(res.cartAddr>>>0).toString(16)}`, dramAddr: `0x${(res.dramAddr>>>0).toString(16)}`, length: `0x${(res.length>>>0).toString(16)}` };
   }
 
@@ -1041,7 +1047,7 @@ async function runRomBootRun(args: string[]) {
 
   // If discovering and no PI activity, try multi-window heuristic reattempts
   if (discover && piLoads.length === 0) {
-    const { hleBoot: hleBoot2, hlePiLoadSegments: hlePi2 } = await import('@n64/core');
+    const { hlePifBoot: hleBoot2, hlePiLoadSegments: hlePi2 } = await import('@n64/core');
 
     // Pass 1: doubling windows (coarse)
     const coarseStarts: number[] = [];
@@ -1053,7 +1059,7 @@ async function runRomBootRun(args: string[]) {
         const cpu2 = new CPU(bus2);
         const sys2 = new System(cpu2, bus2);
         const boot2 = hleBoot2(cpu2, bus2, new Uint8Array(rom));
-        const basePhys2 = (boot2.initialPC >>> 0) - 0x80000000 >>> 0;
+        const basePhys2 = (headerInitialPC >>> 0) - 0x80000000 >>> 0;
         const len2 = Math.min(2 * 1024 * 1024, Math.max(0, rom.length - cartStart));
         if (len2 <= 0 || basePhys2 + len2 > bus2.rdram.bytes.length) continue;
         hlePi2(bus2 as any, [ { cartAddr: cartStart >>> 0, dramAddr: basePhys2 >>> 0, length: len2 >>> 0 } ], true);
@@ -1154,7 +1160,8 @@ async function runRomBootRun(args: string[]) {
   console.log(JSON.stringify({
     command: 'rom-boot-run',
     rom: file,
-    initialPC: boot.initialPC >>> 0,
+    entryPC: boot.entryPC >>> 0,
+    headerInitialPC: headerInitialPC >>> 0,
     endPC: cpu.pc >>> 0,
     cycles,
     viInterval,
