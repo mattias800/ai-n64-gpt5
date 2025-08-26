@@ -868,6 +868,9 @@ async function runRomBootRun(args: string[]) {
   const discover = Object.prototype.hasOwnProperty.call(opts, 'discover');
   const bootPath = opts['boot'];
   const bootOut = opts['boot-out'];
+  const iplHle = Object.prototype.hasOwnProperty.call(opts, 'ipl-hle');
+  const iplCart = parseNum(opts['ipl-cart'], 0);
+  const iplLen = parseNum(opts['ipl-len'], 2 * 1024 * 1024);
 
   const fs = await import('node:fs');
   const rom = fs.readFileSync(file);
@@ -1009,6 +1012,14 @@ async function runRomBootRun(args: string[]) {
     if ((off >>> 0) === 0x14) viOrigin = val >>> 0; // VI_ORIGIN_OFF
     if ((off >>> 0) === 0x18) viWidth = val >>> 0;  // VI_WIDTH_OFF
   };
+
+  // Optional IPL-HLE pre-staging now that PI writes are instrumented
+  let ipl: undefined | { cartAddr: string; dramAddr: string; length: string } = undefined;
+  if (iplHle) {
+    const { hleIplStage } = await import('@n64/core');
+    const res = hleIplStage(bus, new Uint8Array(rom), { initialPC: boot.initialPC >>> 0, cartStart: iplCart >>> 0, length: iplLen >>> 0 });
+    ipl = { cartAddr: `0x${(res.cartAddr>>>0).toString(16)}`, dramAddr: `0x${(res.dramAddr>>>0).toString(16)}`, length: `0x${(res.length>>>0).toString(16)}` };
+  }
 
   // Schedule periodic VI vblank and snapshot if configured
   const frames: Uint8Array[] = [];
@@ -1155,6 +1166,7 @@ async function runRomBootRun(args: string[]) {
     snapshot: snapshot || null,
     discovered: discover ? piLoads : undefined,
     bridge: bridgeCRC32 ? { crc32: bridgeCRC32, snapshot: bridgeSnapshotPath } : undefined,
+    ipl,
   }, null, 2));
 }
 
