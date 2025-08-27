@@ -10,7 +10,8 @@
     "typecheck": "tsc -b",
     "clean": "tsc -b --clean",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:n64-tests": "vitest run packages/core/tests/n64_tests_roms.test.ts"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
