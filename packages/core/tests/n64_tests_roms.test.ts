@@ -19,6 +19,7 @@ function isTruthy(v: string | undefined): boolean {
 }
 
 const ENABLED = isTruthy(process.env.N64_TESTS);
+const DEBUG = isTruthy(process.env.N64_TESTS_DEBUG);
 const DEFAULT_ROM_DIR = path.resolve(__dirname, '../../../test-roms/n64-tests/roms');
 const ROM_DIR = process.env.N64_TESTS_ROM_DIR
   ? path.resolve(process.cwd(), process.env.N64_TESTS_ROM_DIR)
@@ -51,6 +52,12 @@ function runRomAndGetR30(romPath: string): number {
   // Enable fastboot skip to avoid getting stuck in empty exception vectors during early bringup
   cpu.fastbootSkipReserved = true;
   const sys = new System(cpu, bus);
+  if (DEBUG) {
+    cpu.onDecodeWarn = (w) => {
+      // eslint-disable-next-line no-console
+      console.warn(`[decode-warn] pc=${w.pc.toString(16)} kind=${w.kind}`);
+    };
+  }
 
   // Normalize ROM to big-endian (z64) and present it to PI
   const { data: beRom } = normalizeRomToBigEndian(rom);
@@ -70,6 +77,10 @@ function runRomAndGetR30(romPath: string): number {
   for (let i = 0; i < MAX_CYCLES && r30 === 0; i++) {
     sys.stepCycles(1);
     r30 = (cpu.regs[30] | 0);
+    if (DEBUG && (i % 1000000 === 0)) {
+      // eslint-disable-next-line no-console
+      console.log(`[debug] i=${i} pc=0x${(cpu.pc>>>0).toString(16)} r30=${r30}`);
+    }
   }
   return r30 | 0;
 }
