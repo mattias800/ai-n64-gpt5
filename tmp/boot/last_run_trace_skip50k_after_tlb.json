@@ -1,0 +1,73 @@
+{
+  "command": "rom-boot-run",
+  "rom": "mario64.z64",
+  "entryPC": 2751463488,
+  "headerInitialPC": 2149867520,
+  "endPC": 0,
+  "cycles": 200000,
+  "viInterval": 10000,
+  "frames": 0,
+  "vi": {
+    "origin": 0,
+    "width": 0
+  },
+  "events": {
+    "spStarts": 0,
+    "spStatusWrites": 0,
+    "spLastStatus": "0x0",
+    "piDmas": 0,
+    "miInitModeWrites": 1,
+    "miIntrWrites": 0,
+    "miIntrMaskWrites": 0,
+    "viStatusWrites": 0,
+    "viOriginWrites": 0,
+    "viWidthWrites": 0,
+    "dpStatusWrites": 0,
+    "dpIntrAcks": 0,
+    "spRdDmas": 0,
+    "spWrDmas": 0,
+    "siWr64": 0,
+    "siRd64": 0
+  },
+  "stopReason": "AddressErrorLoad at 0x0",
+  "snapshot": null,
+  "trace": [],
+  "deviceEvents": [
+    {
+      "type": "ri",
+      "reg": "0x4",
+      "val": "0x40",
+      "cyc": 22
+    },
+    {
+      "type": "ri",
+      "reg": "0x8",
+      "val": "0x0",
+      "cyc": 32024
+    },
+    {
+      "type": "ri",
+      "reg": "0xc",
+      "val": "0x14",
+      "cyc": 32026
+    },
+    {
+      "type": "ri",
+      "reg": "0x0",
+      "val": "0x0",
+      "cyc": 32027
+    },
+    {
+      "type": "ri",
+      "reg": "0x0",
+      "val": "0xe",
+      "cyc": 32046
+    },
+    {
+      "type": "mi",
+      "reg": "INIT_MODE",
+      "val": "0x10f",
+      "cyc": 32144
+    }
+  ]
+}

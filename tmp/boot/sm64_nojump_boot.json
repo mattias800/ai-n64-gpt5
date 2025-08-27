@@ -1,0 +1,9 @@
+{
+  "piLoads": [
+    {
+      "cartAddr": "0x0",
+      "dramAddr": "0x246000",
+      "length": "0x200000"
+    }
+  ]
+}

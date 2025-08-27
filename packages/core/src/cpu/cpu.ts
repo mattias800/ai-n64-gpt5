@@ -14,6 +14,9 @@ export class CPU {
   pc = 0 >>> 0;
   inDelaySlot = false;
 
+  // One-shot decode warning callback (first occurrence per unique key)
+  onDecodeWarn?: (w: { pc: number; instr: number; kind: string; details?: any }) => void;
+
   // Fastboot/HLE option: when enabled, treat ReservedInstruction as a NOP (skip)
   // instead of raising an exception. Default is false to preserve accuracy.
   public fastbootSkipReserved = false;
@@ -43,8 +46,16 @@ export class CPU {
   private llValid = false;
   private llAddr = 0 >>> 0;
 
+  // Detect spinning in empty exception vector (fastboot-HLE aid)
+  private vectorNopCount = 0;
+
   // Optional single-step trace callback
   onTrace?: (pc: number, instr: number) => void;
+
+  // Track last fetched instruction for diagnostics and warning emission
+  private lastInstrPC = 0 >>> 0;
+  private lastInstrWord = 0 >>> 0;
+  private decodeWarnedKeys = new Set<string>();
 
   constructor(public readonly bus: Bus) {
     // Initialize empty TLB entries
@@ -131,7 +142,20 @@ export class CPU {
     if (this.branchPending) {
       const delayInstrPC = this.pc; // address of delay slot instruction
       const branchInstrPC = (delayInstrPC - 4) >>> 0; // address of branch
-      const delayInstr = this.loadU32TLB(delayInstrPC, true);
+      let delayInstr: number;
+      try {
+        delayInstr = this.loadU32TLB(delayInstrPC, true);
+      } catch (e) {
+        if (e instanceof CPUException) {
+          // Exception occurred fetching the delay slot instruction; treat as BD exception at branch PC
+          this.enterException(e, branchInstrPC >>> 0, e.badVAddr >>> 0, true);
+          this.inDelaySlot = false;
+          this.branchPending = false;
+          this.regs[0] = 0;
+          return;
+        }
+        throw e;
+      }
       const afterDelay = (delayInstrPC + 4) >>> 0;
       const target = this.branchTarget >>> 0;
       // Execute delay slot with BD semantics
@@ -167,9 +191,53 @@ export class CPU {
       return;
     }
 
-    const instr = this.loadU32TLB(instrPC, true);
+    let instr: number;
+    try {
+      instr = this.loadU32TLB(instrPC, true);
+    } catch (e) {
+      if (e instanceof CPUException) {
+        // Treat instruction fetch faults as exceptions at this boundary
+        this.enterException(e, instrPC >>> 0, e.badVAddr >>> 0, false);
+        this.regs[0] = 0;
+        return;
+      }
+      throw e;
+    }
+    // Latch last fetched for diagnostics
+    this.lastInstrPC = instrPC >>> 0;
+    this.lastInstrWord = instr >>> 0;
     // Emit trace for this instruction fetch
     if (this.onTrace) { try { this.onTrace(instrPC >>> 0, instr >>> 0); } catch {} }
+
+    // Fastboot-HLE: auto-return from empty exception vector loops
+    if (this.fastbootSkipReserved) {
+      const status0 = this.cop0.read(12) >>> 0;
+      const inVec = (instrPC >>> 0) >= 0x80000180 && (instrPC >>> 0) < 0x80001000;
+      if (inVec && ((instr >>> 0) === 0)) {
+        this.vectorNopCount = (this.vectorNopCount + 1) | 0;
+      } else {
+        this.vectorNopCount = 0;
+      }
+      // Only auto-return if we are actually in exception level (EXL set) and we've observed a short NOP loop
+      if (((status0 & Cop0.STATUS_EXL) !== 0) && this.vectorNopCount >= 4) {
+        const cause0 = this.cop0.read(13) >>> 0;
+        const epc0 = this.cop0.read(14) >>> 0;
+        // Clear EXL and pending IP bits to avoid immediate re-entry
+        this.cop0.write(12, (status0 & ~Cop0.STATUS_EXL) >>> 0);
+        this.cop0.setCauseInternal(cause0 & ~Cop0.CAUSE_IP_MASK);
+        // Also clear all MI latched interrupts to un-assert IP2 quickly in fastboot
+        // Write-one-to-clear via MI INIT_MODE (0x00), not INTR (0x08) which is read-only.
+        try { (this.bus.mi as any).writeU32(0x00, 0xFFFFFFFF >>> 0); } catch {}
+        // Cancel any pending branch state and return to EPC+4 (skip re-exec)
+        this.branchPending = false;
+        this.branchCommitPending = false;
+        this.pc = (epc0 + 4) >>> 0;
+        this.vectorNopCount = 0;
+        this.regs[0] = 0; // enforce $zero
+        return;
+      }
+    }
+
     this.pc = (instrPC + 4) >>> 0;
     try {
       this.execute(instr);
@@ -206,8 +274,8 @@ export class CPU {
         const v = odd ? e.v1 : e.v0;
         const d = odd ? e.d1 : e.d0;
         if (!v) {
-          // Treat invalid as unmapped: fall back to direct physical address
-          return va >>> 0;
+          // Invalid mapping: treat as unmapped and raise access error below
+          break;
         }
         if (acc === 'w' && !d) {
           // Not dirty: allow write anyway for now (can raise Mod exception later)
@@ -217,7 +285,12 @@ export class CPU {
         return paddr >>> 0;
       }
     }
-    // No match: permissive fallback (treat as unmapped -> 0) but return VA to avoid crash on stores to low memory
+    // No valid TLB mapping: for KUSEG and others, raise a TLB miss/refill exception
+    if (region < 0x8) {
+      if (acc === 'w') throw new CPUException('TLBStore', va >>> 0);
+      else throw new CPUException('TLBLoad', va >>> 0); // covers load and instruction fetch
+    }
+    // Fallback for other regions: return VA as physical
     return va >>> 0;
   }
 
@@ -236,21 +309,29 @@ export class CPU {
 
   private enterException(ex: CPUException, faultingPC: number, badVAddr: number | null, inDelaySlot: boolean): void {
     const excMap: Record<string, number> = {
-      AddressErrorLoad: 4,
-      AddressErrorStore: 5,
-      Overflow: 12,
+      // MIPS R4300 exception codes (Cause.ExcCode)
       Interrupt: 0,
-      Syscall: 8,
+      TLBLoad: 2, // TLBL (load/fetch)
+      TLBStore: 3, // TLBS (store)
+      AddressErrorLoad: 4, // ADEL
+      AddressErrorStore: 5, // ADES
       Breakpoint: 9,
       ReservedInstruction: 10,
+      Syscall: 8,
+      Overflow: 12,
       Trap: 13,
     };
     const code = excMap[ex.code] ?? 0;
     this.cop0.setException(code, faultingPC >>> 0, badVAddr, inDelaySlot);
-    // Vector selection: BEV bit selects 0xBFC00180, else 0x80000180
-    const status = this.cop0.read(12);
+    // Vector selection:
+    // - For TLB Refill (TLBL/TLBS) when not already in EXL, use base + 0x0000
+    // - Otherwise, use general exception vector base + 0x0180
+    const status = this.cop0.read(12) >>> 0;
     const bev = (status >>> 22) & 1;
-    this.pc = bev ? 0xBFC00180 >>> 0 : 0x80000180 >>> 0;
+    const exl = (status & Cop0.STATUS_EXL) !== 0;
+    const isTLBRefill = (ex.code === 'TLBLoad' || ex.code === 'TLBStore');
+    const base = bev ? 0xBFC00000 >>> 0 : 0x80000000 >>> 0;
+    this.pc = (isTLBRefill && !exl) ? base : ((base + 0x180) >>> 0);
   }
 
   private enterInterrupt(epc: number, inDelaySlot: boolean): void {
@@ -358,24 +439,28 @@ export class CPU {
             this.setReg(rd, v);
             return;
           }
-          case 0x24: { // AND rd, rs, rt
-            const v = (this.getReg(rs) & this.getReg(rt)) >>> 0;
-            this.setReg(rd, v);
+          case 0x24: { // AND rd, rs, rt (64-bit logical)
+            const lo = (this.getReg(rs) & this.getReg(rt)) >>> 0;
+            const hi = (this.getRegHi(rs) & this.getRegHi(rt)) >>> 0;
+            this.setReg64(rd, hi, lo);
             return;
           }
-          case 0x25: { // OR rd, rs, rt
-            const v = (this.getReg(rs) | this.getReg(rt)) >>> 0;
-            this.setReg(rd, v);
+          case 0x25: { // OR rd, rs, rt (64-bit logical)
+            const lo = (this.getReg(rs) | this.getReg(rt)) >>> 0;
+            const hi = (this.getRegHi(rs) | this.getRegHi(rt)) >>> 0;
+            this.setReg64(rd, hi, lo);
             return;
           }
-          case 0x26: { // XOR rd, rs, rt
-            const v = (this.getReg(rs) ^ this.getReg(rt)) >>> 0;
-            this.setReg(rd, v);
+          case 0x26: { // XOR rd, rs, rt (64-bit logical)
+            const lo = (this.getReg(rs) ^ this.getReg(rt)) >>> 0;
+            const hi = (this.getRegHi(rs) ^ this.getRegHi(rt)) >>> 0;
+            this.setReg64(rd, hi, lo);
             return;
           }
-          case 0x27: { // NOR rd, rs, rt
-            const v = (~(this.getReg(rs) | this.getReg(rt))) >>> 0;
-            this.setReg(rd, v);
+          case 0x27: { // NOR rd, rs, rt (64-bit logical)
+            const lo = (~(this.getReg(rs) | this.getReg(rt))) >>> 0;
+            const hi = (~(this.getRegHi(rs) | this.getRegHi(rt))) >>> 0;
+            this.setReg64(rd, hi, lo);
             return;
           }
           case 0x2a: { // SLT rd, rs, rt (signed)
@@ -524,6 +609,8 @@ export class CPU {
             return;
           }
           default:
+            // Unknown SPECIAL funct
+            this.warnDecode('special_reserved', `special_funct_0x${funct.toString(16)}`, { funct: funct >>> 0 });
             // Treat unknown R-type as ReservedInstruction (or skip in fastboot)
             if (this.fastbootSkipReserved) return;
             throw new CPUException('ReservedInstruction', this.pc >>> 0);
@@ -668,40 +755,60 @@ export class CPU {
           case 0x08: { // TGEI rs, imm (signed)
             const rsS = (this.getReg(rs) | 0);
             const immS = (signExtend16(imm) | 0);
-            if (rsS >= immS) { if (!this.fastbootSkipReserved) throw new CPUException('Trap', 0); }
+            if (rsS >= immS) {
+              if (this.fastbootSkipReserved) { this.warnDecode('trap_suppressed', 'tgei', { rs: rs >>> 0, imm: immS }); }
+              else { this.warnDecode('trap_taken', 'tgei', { rs: rs >>> 0, imm: immS }); throw new CPUException('Trap', 0); }
+            }
             return;
           }
           case 0x09: { // TGEIU rs, imm (unsigned)
             const rsU = (this.getReg(rs) >>> 0);
             const immU = (signExtend16(imm) >>> 0);
-            if (rsU >= immU) { if (!this.fastbootSkipReserved) throw new CPUException('Trap', 0); }
+            if (rsU >= immU) {
+              if (this.fastbootSkipReserved) { this.warnDecode('trap_suppressed', 'tgeiu', { rs: rs >>> 0, imm: immU }); }
+              else { this.warnDecode('trap_taken', 'tgeiu', { rs: rs >>> 0, imm: immU }); throw new CPUException('Trap', 0); }
+            }
             return;
           }
           case 0x0a: { // TLTI rs, imm (signed)
             const rsS = (this.getReg(rs) | 0);
             const immS = (signExtend16(imm) | 0);
-            if (rsS < immS) { if (!this.fastbootSkipReserved) throw new CPUException('Trap', 0); }
+            if (rsS < immS) {
+              if (this.fastbootSkipReserved) { this.warnDecode('trap_suppressed', 'tlti', { rs: rs >>> 0, imm: immS }); }
+              else { this.warnDecode('trap_taken', 'tlti', { rs: rs >>> 0, imm: immS }); throw new CPUException('Trap', 0); }
+            }
             return;
           }
           case 0x0b: { // TLTIU rs, imm (unsigned)
             const rsU = (this.getReg(rs) >>> 0);
             const immU = (signExtend16(imm) >>> 0);
-            if (rsU < immU) { if (!this.fastbootSkipReserved) throw new CPUException('Trap', 0); }
+            if (rsU < immU) {
+              if (this.fastbootSkipReserved) { this.warnDecode('trap_suppressed', 'tltiu', { rs: rs >>> 0, imm: immU }); }
+              else { this.warnDecode('trap_taken', 'tltiu', { rs: rs >>> 0, imm: immU }); throw new CPUException('Trap', 0); }
+            }
             return;
           }
           case 0x0c: { // TEQI rs, imm
             const rsS = (this.getReg(rs) | 0);
             const immS = (signExtend16(imm) | 0);
-            if (rsS === immS) { if (!this.fastbootSkipReserved) throw new CPUException('Trap', 0); }
+            if (rsS === immS) {
+              if (this.fastbootSkipReserved) { this.warnDecode('trap_suppressed', 'teqi', { rs: rs >>> 0, imm: immS }); }
+              else { this.warnDecode('trap_taken', 'teqi', { rs: rs >>> 0, imm: immS }); throw new CPUException('Trap', 0); }
+            }
             return;
           }
           case 0x0e: { // TNEI rs, imm
             const rsS = (this.getReg(rs) | 0);
             const immS = (signExtend16(imm) | 0);
-            if (rsS !== immS) { if (!this.fastbootSkipReserved) throw new CPUException('Trap', 0); }
+            if (rsS !== immS) {
+              if (this.fastbootSkipReserved) { this.warnDecode('trap_suppressed', 'tnei', { rs: rs >>> 0, imm: immS }); }
+              else { this.warnDecode('trap_taken', 'tnei', { rs: rs >>> 0, imm: immS }); throw new CPUException('Trap', 0); }
+            }
             return;
           }
           default:
+            // Unknown REGIMM variant
+            this.warnDecode('regimm_unknown_rt', `regimm_rt_0x${rtField.toString(16)}`, { rt: rtField >>> 0 });
             // Treat unknown REGIMM variant as ReservedInstruction (or skip in fastboot)
             if (this.fastbootSkipReserved) return;
             throw new CPUException('ReservedInstruction', this.pc >>> 0);
@@ -984,12 +1091,14 @@ export class CPU {
                 return;
               }
               default:
-                // Unsupported variant: treat as NOP branch not taken
+                // Unsupported variant: warn once, then treat as not taken
+                this.warnDecode('cop1_bc1_unknown_rt', `cop1_bc1_rt_0x${(rt>>>0).toString(16)}`, { rt: rt >>> 0 });
                 this.branchPending = false; return;
             }
           }
           default:
-            // Treat unhandled COP1 ops as NOP to allow progression during boot
+            // Warn once about unhandled COP1 group, then treat as NOP to allow progression during boot
+            this.warnDecode('cop1_unhandled_rs', `cop1_rs_0x${rsField.toString(16)}`, { rs: rsField >>> 0 });
             return;
         }
       }
@@ -1062,6 +1171,8 @@ export class CPU {
           }
         }
         default:
+          // Unknown COP0 rs group
+          this.warnDecode('cop0_unknown_rs', `cop0_rs_0x${rsField.toString(16)}`, { rs: rsField >>> 0 });
           // Treat unimplemented COP0 variants as ReservedInstruction (or skip in fastboot)
           if (this.fastbootSkipReserved) return;
           throw new CPUException('ReservedInstruction', this.pc >>> 0);
@@ -1187,6 +1298,8 @@ export class CPU {
         return;
       }
       default:
+        // Unknown major opcode: warn once
+        this.warnDecode('opcode_reserved', `op_0x${op.toString(16)}`, { op: op >>> 0 });
         // Unknown major opcode -> ReservedInstruction exception (or skip in fastboot)
         if (this.fastbootSkipReserved) return;
         throw new CPUException('ReservedInstruction', this.pc >>> 0);
@@ -1196,6 +1309,17 @@ export class CPU {
   private invalidateLL(addr: number): void {
     const aligned = (addr >>> 0) & ~3;
     if (this.llValid && this.llAddr === aligned) this.llValid = false;
+  }
+
+  // Emit a one-shot decode warning by unique key
+  private warnDecode(kind: string, uniqueKey: string, details?: any): void {
+    if (this.decodeWarnedKeys.has(uniqueKey)) return;
+    this.decodeWarnedKeys.add(uniqueKey);
+    if (this.onDecodeWarn) {
+      try {
+        this.onDecodeWarn({ pc: this.lastInstrPC >>> 0, instr: this.lastInstrWord >>> 0, kind, details });
+      } catch {}
+    }
   }
 
   private writeTLBEntry(idx: number): void {

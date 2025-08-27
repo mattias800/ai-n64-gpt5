@@ -26,5 +26,5 @@ export { translateF3DEXToUc } from './boot/f3dex_translator.js';
 export { readControllerState } from './input/input.js';
 export { decompressMIO0 } from './utils/mio0.js';
 // Re-export selected MMIO constants for headless tooling and tests
-export { PI_BASE, PI_STATUS_OFF, PI_STATUS_DMA_BUSY } from './devices/mmio.js';
+export { PI_BASE, PI_STATUS_OFF, PI_STATUS_DMA_BUSY, PI_STATUS_IO_BUSY } from './devices/mmio.js';
 

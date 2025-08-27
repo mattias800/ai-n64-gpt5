@@ -482,6 +482,14 @@ export class PI extends MMIO {
           const baseRom = this.cartAddr >>> 0;
           const baseRam = this.dramAddr >>> 0;
           const len = ((val & 0x00ffffff) >>> 0) + 1; // PI uses length-1 semantics
+          if (process.env.N64_TESTS_DEBUG) {
+            const start = baseRam >>> 0, end = (baseRam + len) >>> 0;
+            const overlaps = (start < 0x98f8+8 && end > 0x98f8) || (start < 0xa578+8 && end > 0xa578);
+            if (overlaps) {
+              // eslint-disable-next-line no-console
+              console.log(`[PI RD] dma to 0x${baseRam.toString(16)} len=0x${len.toString(16)} from cart=0x${baseRom.toString(16)}`);
+            }
+          }
           for (let i = 0; i < len; i++) {
             const b = this.rom[baseRom + i] ?? 0;
             if (baseRam + i < this.rdram.length) this.rdram[baseRam + i] = b;
@@ -494,14 +502,16 @@ export class PI extends MMIO {
         return;
       case PI_WR_LEN_OFF:
         this.wrLen = val; this.status |= (PI_STATUS_DMA_BUSY | PI_STATUS_IO_BUSY);
-        // Treat WR_LEN same as RD_LEN for test harness: copy from ROM to RDRAM synchronously
-        if (this.rom && this.rdram) {
-          const baseRom = this.cartAddr >>> 0;
+        // Correct semantics: WR_LEN is RDRAM -> cart write. We do not model cart memory, so perform no data movement.
+        // Preserve timing/interrupt behavior only.
+        if (process.env.N64_TESTS_DEBUG) {
           const baseRam = this.dramAddr >>> 0;
           const len = ((val & 0x00ffffff) >>> 0) + 1;
-          for (let i = 0; i < len; i++) {
-            const b = this.rom[baseRom + i] ?? 0;
-            if (baseRam + i < this.rdram.length) this.rdram[baseRam + i] = b;
+          const start = baseRam >>> 0, end = (baseRam + len) >>> 0;
+          const overlaps = (start < 0x98f8+8 && end > 0x98f8) || (start < 0xa578+8 && end > 0xa578);
+          if (overlaps) {
+            // eslint-disable-next-line no-console
+            console.log(`[PI WR] (ignored data) src=0x${baseRam.toString(16)} len=0x${len.toString(16)} cartAddr=0x${(this.cartAddr>>>0).toString(16)}`);
           }
         }
         this.status &= ~PI_STATUS_DMA_BUSY;

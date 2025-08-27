@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { Bus, RDRAM, CPU, System, runSM64TitleDemoDP, runSM64TitleDemoSPDP, writeSM64TitleTasksToRDRAM, scheduleSPTitleTasksFromRDRAMAndRun, writeRSPTitleDLsToRDRAM, scheduleRSPDLFramesAndRun, writeUcAsRspdl, f3dToUc, scheduleRSPDLFromTableAndRun, scheduleF3DEXFromTableAndRun, translateF3DEXAndExecNow, hlePiLoadSegments, decompressMIO0, viScanout, PI_BASE, PI_STATUS_OFF, PI_STATUS_DMA_BUSY, hlePifControllerStatus, hlePifReadControllerState } from '@n64/core';
+import { Bus, RDRAM, CPU, System, runSM64TitleDemoDP, runSM64TitleDemoSPDP, writeSM64TitleTasksToRDRAM, scheduleSPTitleTasksFromRDRAMAndRun, writeRSPTitleDLsToRDRAM, scheduleRSPDLFramesAndRun, writeUcAsRspdl, f3dToUc, scheduleRSPDLFromTableAndRun, scheduleF3DEXFromTableAndRun, translateF3DEXAndExecNow, hlePiLoadSegments, decompressMIO0, viScanout, PI_BASE, PI_STATUS_OFF, PI_STATUS_DMA_BUSY, PI_STATUS_IO_BUSY, hlePifControllerStatus, hlePifReadControllerState } from '@n64/core';
 import { crc32 } from './lib.js';
 
 function parseNum(val: string | undefined, def: number): number {
@@ -856,16 +856,38 @@ async function runRomBootRun(args: string[]) {
   const height = parseNum(opts['height'], 240);
   const snapshot = opts['snapshot'];
   const discover = Object.prototype.hasOwnProperty.call(opts, 'discover');
+  const discoverNoPrestage = Object.prototype.hasOwnProperty.call(opts, 'discover-no-prestage') || Object.prototype.hasOwnProperty.call(opts, 'discover_noprestage') || Object.prototype.hasOwnProperty.call(opts, 'discoverNoPrestage');
   const bootPath = opts['boot'];
   const bootOut = opts['boot-out'];
   const iplHle = Object.prototype.hasOwnProperty.call(opts, 'ipl-hle');
   const bridge = Object.prototype.hasOwnProperty.call(opts, 'bridge');
   const bridgeTest = Object.prototype.hasOwnProperty.call(opts, 'bridge-test');
+  // Diagnostic: force an SP gfx task injection at a specific cycle
+  const forceSpAt = opts['force-sp-at'] ? parseNum(opts['force-sp-at'], 0) >>> 0 : 0;
   const viInit = Object.prototype.hasOwnProperty.call(opts, 'vi-init');
+  const noViVblank = Object.prototype.hasOwnProperty.call(opts, 'no-vi-vblank') || Object.prototype.hasOwnProperty.call(opts, 'noViVblank') || Object.prototype.hasOwnProperty.call(opts, 'no_vi_vblank');
   const fastbootHle = Object.prototype.hasOwnProperty.call(opts, 'fastboot-hle');
+  const timerHle = Object.prototype.hasOwnProperty.call(opts, 'timer-hle') || Object.prototype.hasOwnProperty.call(opts, 'timerHle') || Object.prototype.hasOwnProperty.call(opts, 'timer_hle');
   const iplCart = parseNum(opts['ipl-cart'], 0);
   const iplLen = parseNum(opts['ipl-len'], 2 * 1024 * 1024);
   const traceBoot = parseNum(opts['trace-boot'], 0);
+  const traceBootSkip = parseNum(opts['trace-boot-skip'], 0);
+  // Memory dump options (KSEG0/KSEG1 VA -> phys)
+  const dumpWordsVA = opts['dump-words'] ? parseNum(opts['dump-words'], 0) >>> 0 : null;
+  const dumpCount = parseNum(opts['dump-count'], 64) >>> 0;
+  // Post-step memory dump options (one or more comma-separated base VAs)
+  const dumpWordsAfterList = opts['dump-words-after'] ? String(opts['dump-words-after']) : null;
+  const dumpCountAfter = parseNum(opts['dump-count-after'], 32) >>> 0;
+  // Disassembler options (KSEG0/KSEG1 VA -> phys)
+  const disasmVA = opts['disasm'] ? parseNum(opts['disasm'], 0) >>> 0 : null;
+  const disasmCount = parseNum(opts['disasm-count'], 64) >>> 0; // number of 32-bit words
+  // Memory poke options: --poke32 "0xADDR=0xVAL,0xADDR=0xVAL,..."
+  const poke32List = opts['poke32'] ? String(opts['poke32']) : null;
+  // Scheduled memory pokes during execution: --poke32-at "CYC:0xADDR=0xVAL,0xADDR2=0xVAL2;CYC2:0xADDR3=0xVAL3"
+  const poke32AtList = opts['poke32-at'] ? String(opts['poke32-at']) : null;
+  // CP0 trace options
+  const traceCp0 = Object.prototype.hasOwnProperty.call(opts, 'trace-cp0') || Object.prototype.hasOwnProperty.call(opts, 'traceCp0') || Object.prototype.hasOwnProperty.call(opts, 'trace_cp0');
+  const traceCp0Interval = parseNum(opts['trace-cp0-interval'] || opts['traceCp0Interval'] || opts['trace_cp0_interval'], 100000);
   const jumpHeader = Object.prototype.hasOwnProperty.call(opts, 'jump-header');
   // Manual pre-staging flags
   const stageCartOpt = opts['stage-cart'] ? parseNum(opts['stage-cart'], 0) >>> 0 : null;
@@ -878,6 +900,18 @@ async function runRomBootRun(args: string[]) {
   const bridgeBgEndOpt = opts['bridge-bg-end'] ? parseNum(opts['bridge-bg-end'], 0) >>> 0 : null;
   const bridgeLog = Object.prototype.hasOwnProperty.call(opts, 'bridge-log');
   const bridgeAny = Object.prototype.hasOwnProperty.call(opts, 'bridge-any');
+  // Event filtering: when enabled, only record SI/PI/SP/DP to deviceEvents
+  const eventsSlim = Object.prototype.hasOwnProperty.call(opts, 'events-slim') || Object.prototype.hasOwnProperty.call(opts, 'eventsSlim') || Object.prototype.hasOwnProperty.call(opts, 'events_slim');
+  const allowEvent = (t: string) => (!eventsSlim || t === 'pi' || t === 'si' || t === 'sp' || t === 'dp');
+  // PI STATUS trace toggle: off by default to avoid massive spam; enable with --trace-pi-status
+  const tracePiStatus = Object.prototype.hasOwnProperty.call(opts, 'trace-pi-status') || Object.prototype.hasOwnProperty.call(opts, 'tracePiStatus') || Object.prototype.hasOwnProperty.call(opts, 'trace_pi_status');
+  // Optional PI kick DMA injection (for diagnostics)
+  const kickPiCart = opts['kick-pi-cart'] ? parseNum(opts['kick-pi-cart'], 0) >>> 0 : null;
+  const kickPiDram = opts['kick-pi-dram'] ? parseNum(opts['kick-pi-dram'], 0) >>> 0 : null;
+  const kickPiLen  = opts['kick-pi-len']  ? parseNum(opts['kick-pi-len'], 0)  >>> 0 : null;
+  const kickPiAt   = opts['kick-pi-at']   ? parseNum(opts['kick-pi-at'], 10000) >>> 0 : 0;
+  // Optional one-shot PIF controller handshake (status+state) without enabling full fastboot
+  const pifHandshake = Object.prototype.hasOwnProperty.call(opts, 'pif-handshake') || Object.prototype.hasOwnProperty.call(opts, 'pifHandshake') || Object.prototype.hasOwnProperty.call(opts, 'pif_handshake');
 
   const fs = await import('node:fs');
   const rom = fs.readFileSync(file);
@@ -886,6 +920,14 @@ async function runRomBootRun(args: string[]) {
   const { normalizeRomToBigEndian, parseHeader } = await import('@n64/core');
   const { data: beRom } = normalizeRomToBigEndian(new Uint8Array(rom));
   const headerInitialPC = parseHeader(beRom).initialPC >>> 0;
+  const vaToPhys = (va: number): number | null => {
+    const a = va >>> 0;
+    const seg = a >>> 29; // top 3 bits
+    if (seg === 0b100 || seg === 0b101) return (a - 0x80000000) >>> 0; // KSEG0
+    if (seg === 0b101) return (a - 0xA0000000) >>> 0; // unreachable due to previous case, but kept for clarity
+    if (seg === 0) return a >>> 0; // KUSEG low, assume identity
+    return null;
+  };
 
   // Bigger RDRAM so KSEG0 physical addresses are in range
   const rdram = new RDRAM(8 * 1024 * 1024);
@@ -894,8 +936,17 @@ async function runRomBootRun(args: string[]) {
   const sys = new System(cpu, bus);
   const trace: { pc: string, instr: string }[] = [];
   const events: any[] = [];
+  const cpuWarnings: { pc: string; instr: string; kind: string; details?: Record<string, any> }[] = [];
+  const cp0Trace: { cyc: number; status: string; cause: string; count: string; compare: string }[] = [];
+  // Capture first-occurrence decode warnings (unknown/reserved) with a cap to avoid huge logs
+  cpu.onDecodeWarn = (w) => {
+    if (cpuWarnings.length >= 64) return;
+    const details = w.details && typeof w.details === 'object' ? Object.fromEntries(Object.entries(w.details).map(([k, v]) => [k, typeof v === 'number' ? `0x${((v as number)>>>0).toString(16)}` : v])) : undefined;
+    cpuWarnings.push({ pc: `0x${w.pc.toString(16)}`, instr: `0x${w.instr.toString(16)}`, kind: String(w.kind), details });
+  };
   if (traceBoot > 0) {
     cpu.onTrace = (pc, instr) => {
+      if (sys.cycle < traceBootSkip) return;
       if (trace.length < traceBoot) trace.push({ pc: `0x${pc.toString(16)}`, instr: `0x${instr.toString(16)}` });
     };
   }
@@ -909,15 +960,54 @@ async function runRomBootRun(args: string[]) {
   const { hlePifBoot, hlePiLoadSegments } = await import('@n64/core');
   const boot = hlePifBoot(cpu, bus, new Uint8Array(rom));
 
+  // Optional timer interrupt HLE for non-fastboot runs: enable CP0 IE+IM2+IM7 and schedule periodic Compare updates
+  if (timerHle && !fastbootHle) {
+    try {
+      const IE = 1 << 0; const IM2 = 1 << (8 + 2); const IM7 = 1 << (8 + 7);
+      const sr0 = cpu.cop0.read(12) >>> 0;
+      cpu.cop0.write(12, (sr0 | IE | IM2 | IM7) >>> 0);
+      // Install minimal ERET at physical 0x00000180 in case the game hasn't set its own yet
+      bus.storeU32(0x00000180 >>> 0, 0x42000018 >>> 0);
+      bus.storeU32(0x00000184 >>> 0, 0x00000000 >>> 0);
+      // Program periodic timer
+      const period = parseNum(opts['timer-period'], 50000);
+      const cnt0 = cpu.cop0.read(9) >>> 0;
+      cpu.cop0.write(11, (cnt0 + period) >>> 0);
+      const repeats = Math.max(1, Math.floor(cycles / Math.max(1, period)));
+      sys.scheduleEvery(period >>> 0, period >>> 0, repeats, () => {
+        const cNow = cpu.cop0.read(9) >>> 0;
+        cpu.cop0.write(11, (cNow + period) >>> 0);
+      });
+    } catch {}
+  }
+
   // Optional minimal fastboot HLE: enable CPU interrupts, MI masks, and perform a controller handshake once.
   if (fastbootHle) {
-    // Enable CPU IE and IM2 (IP2 used for MI)
-    const IE = 1 << 0; const IM2 = 1 << (8 + 2);
-    cpu.cop0.write(12, IE | IM2);
+    // Enable CPU IE and IM2 (IP2 used for MI) + IM7 (timer)
+    const IE = 1 << 0; const IM2 = 1 << (8 + 2); const IM7 = 1 << (8 + 7);
+    cpu.cop0.write(12, (IE | IM2 | IM7) >>> 0);
     // Enable MI masks for SP|SI|VI|PI|DP (bits 0,1,3,4,5)
     const MI_INTR_MASK_OFF = 0x0c >>> 0;
     const mask = ((1<<0)|(1<<1)|(1<<3)|(1<<4)|(1<<5)) >>> 0;
     bus.mi.writeU32(MI_INTR_MASK_OFF, mask);
+    // Install a minimal general exception handler at 0x80000180 that immediately ERET
+    // ERET = 0x42000018; followed by NOP
+    try {
+      // Write to physical 0x00000180; CPU fetches from virtual 0x80000180 (KSEG0)
+      bus.storeU32(0x00000180 >>> 0, 0x42000018 >>> 0);
+      bus.storeU32(0x00000184 >>> 0, 0x00000000 >>> 0);
+    } catch {}
+    // Program a periodic timer by setting CP0 Compare relative to Count and periodically updating it
+    const period = parseNum(opts['fastboot-timer'], 50000);
+    try {
+      const cnt0 = cpu.cop0.read(9) >>> 0; // Count
+      cpu.cop0.write(11, (cnt0 + period) >>> 0); // Compare
+      const repeats = Math.max(1, Math.floor(cycles / Math.max(1, period)));
+      sys.scheduleEvery(period >>> 0, period >>> 0, repeats, () => {
+        const cNow = cpu.cop0.read(9) >>> 0;
+        cpu.cop0.write(11, (cNow + period) >>> 0);
+      });
+    } catch {}
     // Enable fastboot reserved-instruction skip so we don't stall on unhandled opcodes early
     (cpu as any).fastbootSkipReserved = true;
     // Perform a simple controller status+state handshake at DRAM base to satisfy early input init code paths
@@ -950,7 +1040,7 @@ async function runRomBootRun(args: string[]) {
   // Try the provided --ipl-cart/--ipl-len first; if it doesn't look like code at the header PC, scan candidates.
 
   // Heuristic pre-stage when discovering and no boot script provided:
-  if (!bootPath && discover) {
+  if (!bootPath && discover && !discoverNoPrestage) {
     const basePhys = (headerInitialPC >>> 0) - 0x80000000 >>> 0;
     const guessLen = Math.min((rom.length >>> 0), 2 * 1024 * 1024);
     if (basePhys + guessLen <= bus.rdram.bytes.length) {
@@ -1000,6 +1090,11 @@ async function runRomBootRun(args: string[]) {
   let viStatusWrites = 0;
   let lastPiDram = 0 >>> 0;
   let lastPiCart = 0 >>> 0;
+  let piStatusWrites = 0;
+  // PI read instrumentation
+  let piStatusReads = 0;
+  let piStatusReadsBusy = 0; // times any busy bit observed set
+  let piStatusReadLast: number = 0;
   const piLoads: { cartAddr: number; dramAddr: number; length: number }[] = [];
   // MI summary counters
   let miInitModeWrites = 0;
@@ -1086,7 +1181,7 @@ async function runRomBootRun(args: string[]) {
       else if (o === 0x08) reg = 'RD_LEN';
       else if (o === 0x0c) reg = 'WR_LEN';
       else if (o === 0x10) reg = 'STATUS';
-      events.push({ type:'sp', reg, val:`0x${v.toString(16)}`, cyc: sys.cycle });
+      if (allowEvent('sp')) events.push({ type:'sp', reg, val:`0x${v.toString(16)}`, cyc: sys.cycle });
     }
     if (o === 0x00) {
       // SP_MEM_ADDR (also used as START when value==1 in our stub)
@@ -1195,23 +1290,24 @@ async function runRomBootRun(args: string[]) {
   // Only record PI activity that happens while the CPU is executing (exclude our pre-staging)
   let monitorActive = false;
   const piWrite = bus.pi.writeU32.bind(bus.pi) as (off: number, val: number) => void;
+  const piRead = bus.pi.readU32.bind(bus.pi) as (off: number) => number;
   (bus.pi as any).writeU32 = (off: number, val: number) => {
     const offU = off >>> 0;
     const valU = val >>> 0;
-    if (offU === 0x00) { lastPiDram = valU >>> 0; if (traceBoot>0 && monitorActive) events.push({ type:'pi', reg:'DRAM_ADDR', val:`0x${valU.toString(16)}`, cyc: sys.cycle }); }
-    if (offU === 0x04) { lastPiCart = valU >>> 0; if (traceBoot>0 && monitorActive) events.push({ type:'pi', reg:'CART_ADDR', val:`0x${valU.toString(16)}`, cyc: sys.cycle }); }
+    if (offU === 0x00) { lastPiDram = valU >>> 0; if (traceBoot>0 && monitorActive && allowEvent('pi')) events.push({ type:'pi', reg:'DRAM_ADDR', val:`0x${valU.toString(16)}`, cyc: sys.cycle }); }
+    if (offU === 0x04) { lastPiCart = valU >>> 0; if (traceBoot>0 && monitorActive && allowEvent('pi')) events.push({ type:'pi', reg:'CART_ADDR', val:`0x${valU.toString(16)}`, cyc: sys.cycle }); }
     if (offU === 0x08) { // PI_RD_LEN
       if (monitorActive) {
         piReads++;
         const len = ((valU & 0x00ffffff) >>> 0) + 1;
         piLoads.push({ cartAddr: lastPiCart >>> 0, dramAddr: lastPiDram >>> 0, length: len >>> 0 });
-        if (traceBoot>0) events.push({ type:'pi', reg:'RD_LEN', val:`0x${valU.toString(16)}`, cart:`0x${lastPiCart.toString(16)}`, dram:`0x${lastPiDram.toString(16)}`, len:`0x${len.toString(16)}`, cyc: sys.cycle });
+        if (traceBoot>0 && allowEvent('pi')) events.push({ type:'pi', reg:'RD_LEN', val:`0x${valU.toString(16)}`, cart:`0x${lastPiCart.toString(16)}`, dram:`0x${lastPiDram.toString(16)}`, len:`0x${len.toString(16)}`, cyc: sys.cycle });
       }
       // Schedule a short-latency DMA completion so ROM doesn't stall on IO busy/interrupts.
       const when = (sys.cycle + 64) >>> 0;
       sys.scheduleAt(when, () => {
         bus.pi.completeDMA();
-        if (traceBoot>0 && monitorActive) events.push({ type:'pi', reg:'AUTO_COMPLETE_DMA', cart:`0x${lastPiCart.toString(16)}`, dram:`0x${lastPiDram.toString(16)}`, len:`0x${(((valU & 0x00ffffff)>>>0)+1).toString(16)}`, cyc: sys.cycle });
+        if (traceBoot>0 && monitorActive && allowEvent('pi')) events.push({ type:'pi', reg:'AUTO_COMPLETE_DMA', cart:`0x${lastPiCart.toString(16)}`, dram:`0x${lastPiDram.toString(16)}`, len:`0x${(((valU & 0x00ffffff)>>>0)+1).toString(16)}`, cyc: sys.cycle });
       });
     }
     if (offU === 0x0C) { // PI_WR_LEN
@@ -1220,21 +1316,57 @@ async function runRomBootRun(args: string[]) {
       const when = (sys.cycle + 64) >>> 0;
       sys.scheduleAt(when, () => {
         bus.pi.completeDMA();
-        if (traceBoot>0 && monitorActive) events.push({ type:'pi', reg:'AUTO_COMPLETE_DMA_WR', cart:`0x${lastPiCart.toString(16)}`, dram:`0x${lastPiDram.toString(16)}`, len:`0x${len.toString(16)}`, cyc: sys.cycle });
+        if (traceBoot>0 && monitorActive && allowEvent('pi')) events.push({ type:'pi', reg:'AUTO_COMPLETE_DMA_WR', cart:`0x${lastPiCart.toString(16)}`, dram:`0x${lastPiDram.toString(16)}`, len:`0x${len.toString(16)}`, cyc: sys.cycle });
       });
       if (traceBoot>0 && monitorActive) events.push({ type:'pi', reg:'WR_LEN', val:`0x${valU.toString(16)}`, cart:`0x${lastPiCart.toString(16)}`, dram:`0x${lastPiDram.toString(16)}`, len:`0x${len.toString(16)}`, cyc: sys.cycle });
     }
-    if (offU === 0x10 && traceBoot>0 && monitorActive) events.push({ type:'pi', reg:'STATUS', val:`0x${valU.toString(16)}`, cyc: sys.cycle });
+    if (offU === 0x10) {
+      if (monitorActive) piStatusWrites++;
+      if (traceBoot>0 && monitorActive && allowEvent('pi') && tracePiStatus) {
+        let regsSnap: any | undefined;
+        try {
+          const rr: any = (cpu as any).r || (cpu as any).regs || (cpu as any).gpr;
+          if (rr && rr.length === 32) {
+            const hex = (x: number) => `0x${((x>>>0)>>>0).toString(16)}`;
+            regsSnap = {
+              a0: hex(rr[4]), a1: hex(rr[5]), a2: hex(rr[6]), a3: hex(rr[7]),
+              t0: hex(rr[8]), t1: hex(rr[9]), t2: hex(rr[10]), t3: hex(rr[11]),
+              t4: hex(rr[12]), t5: hex(rr[13]), t6: hex(rr[14]), t7: hex(rr[15]),
+              t8: hex(rr[24]), t9: hex(rr[25]),
+              s0: hex(rr[16]), s1: hex(rr[17]), s2: hex(rr[18]), s3: hex(rr[19]),
+              s4: hex(rr[20]), s5: hex(rr[21]), s6: hex(rr[22]), s7: hex(rr[23]),
+              gp: hex(rr[28]), sp: hex(rr[29]), s8: hex(rr[30]), ra: hex(rr[31]),
+            };
+          }
+        } catch {}
+        const evt: any = { type:'pi', reg:'STATUS', val:`0x${valU.toString(16)}`, cyc: sys.cycle, pc: `0x${(cpu.pc>>>0).toString(16)}` };
+        if (regsSnap) evt.regs = regsSnap;
+        events.push(evt);
+      }
+    }
     piWrite(offU, valU);
+  };
+  (bus.pi as any).readU32 = (off: number) => {
+    const o = off >>> 0;
+    const v = piRead(o) >>> 0;
+    if (o === 0x10) {
+      piStatusReads++;
+      piStatusReadLast = v >>> 0;
+      if ((v & ((PI_STATUS_DMA_BUSY | PI_STATUS_IO_BUSY) >>> 0)) !== 0) piStatusReadsBusy++;
+      if (traceBoot>0 && monitorActive && allowEvent('pi')) {
+        events.push({ type:'pi', reg:'STATUS_RD', val:`0x${v.toString(16)}`, cyc: sys.cycle });
+      }
+    }
+    return v >>> 0;
   };
   const viWrite = bus.vi.writeU32.bind(bus.vi) as (off: number, val: number) => void;
   (bus.vi as any).writeU32 = (off: number, val: number) => {
     viWrite(off, val >>> 0);
     // Mirror public fields for convenience and accept both legacy and real offsets
     const o = (off >>> 0);
-    if (o === 0x00 || o === 0x10) { if (monitorActive) viStatusWrites++; if (traceBoot>0 && monitorActive) events.push({ type:'vi', reg:'STATUS', val:`0x${(val>>>0).toString(16)}`, cyc: sys.cycle }); }
-    if (o === 0x14 || o === 0x04) { viOrigin = val >>> 0; if (monitorActive) viOriginWrites++; if (traceBoot>0 && monitorActive) events.push({ type:'vi', reg:'ORIGIN', val:`0x${(val>>>0).toString(16)}`, cyc: sys.cycle }); }
-    if (o === 0x18 || o === 0x08) { viWidth = val >>> 0;  if (monitorActive) viWidthWrites++; if (traceBoot>0 && monitorActive) events.push({ type:'vi', reg:'WIDTH', val:`0x${(val>>>0).toString(16)}`, cyc: sys.cycle }); }
+    if (o === 0x00 || o === 0x10) { if (monitorActive) viStatusWrites++; if (traceBoot>0 && monitorActive && allowEvent('vi')) events.push({ type:'vi', reg:'STATUS', val:`0x${(val>>>0).toString(16)}`, cyc: sys.cycle }); }
+    if (o === 0x14 || o === 0x04) { viOrigin = val >>> 0; if (monitorActive) viOriginWrites++; if (traceBoot>0 && monitorActive && allowEvent('vi')) events.push({ type:'vi', reg:'ORIGIN', val:`0x${(val>>>0).toString(16)}`, cyc: sys.cycle }); }
+    if (o === 0x18 || o === 0x08) { viWidth = val >>> 0;  if (monitorActive) viWidthWrites++; if (traceBoot>0 && monitorActive && allowEvent('vi')) events.push({ type:'vi', reg:'WIDTH', val:`0x${(val>>>0).toString(16)}`, cyc: sys.cycle }); }
   };
   const dpWrite = bus.dp.writeU32.bind(bus.dp) as (off: number, val: number) => void;
   (bus.dp as any).writeU32 = (off: number, val: number) => {
@@ -1242,7 +1374,7 @@ async function runRomBootRun(args: string[]) {
     if (o === 0x10) {
       if (monitorActive) dpStatusWrites++;
       if ((v & 0x1) !== 0 && monitorActive) dpIntrAcks++;
-      if (traceBoot>0 && monitorActive) events.push({ type:'dp', reg:'STATUS', val:`0x${v.toString(16)}`, cyc: sys.cycle });
+      if (traceBoot>0 && monitorActive && allowEvent('dp')) events.push({ type:'dp', reg:'STATUS', val:`0x${v.toString(16)}`, cyc: sys.cycle });
     }
     dpWrite(o, v);
   };
@@ -1250,9 +1382,9 @@ async function runRomBootRun(args: string[]) {
   const siWrite = bus.si.writeU32.bind(bus.si) as (off: number, val: number) => void;
   (bus.si as any).writeU32 = (off: number, val: number) => {
     const o = off >>> 0, v = val >>> 0;
-    if (o === 0x10) { if (monitorActive) siWr64Count++; if (traceBoot>0 && monitorActive) events.push({ type:'si', reg:'PIF_ADDR_WR64B', val:`0x${v.toString(16)}`, cyc: sys.cycle }); }
-    if (o === 0x04) { if (monitorActive) siRd64Count++; if (traceBoot>0 && monitorActive) events.push({ type:'si', reg:'PIF_ADDR_RD64B', val:`0x${v.toString(16)}`, cyc: sys.cycle }); }
-    if (o === 0x18 && traceBoot>0 && monitorActive) events.push({ type:'si', reg:'STATUS', val:`0x${v.toString(16)}`, cyc: sys.cycle });
+    if (o === 0x10) { if (monitorActive) siWr64Count++; if (traceBoot>0 && monitorActive && allowEvent('si')) events.push({ type:'si', reg:'PIF_ADDR_WR64B', val:`0x${v.toString(16)}`, cyc: sys.cycle }); }
+    if (o === 0x04) { if (monitorActive) siRd64Count++; if (traceBoot>0 && monitorActive && allowEvent('si')) events.push({ type:'si', reg:'PIF_ADDR_RD64B', val:`0x${v.toString(16)}`, cyc: sys.cycle }); }
+    if (o === 0x18 && traceBoot>0 && monitorActive && allowEvent('si')) events.push({ type:'si', reg:'STATUS', val:`0x${v.toString(16)}`, cyc: sys.cycle });
     siWrite(o, v);
   };
   const miWrite = bus.mi.writeU32.bind(bus.mi) as (off: number, val: number) => void;
@@ -1263,7 +1395,7 @@ async function runRomBootRun(args: string[]) {
       else if (o === 0x08) miIntrWrites++;
       else if (o === 0x0c) miIntrMaskWrites++;
     }
-    if (traceBoot>0 && monitorActive) {
+    if (traceBoot>0 && monitorActive && allowEvent('mi')) {
       let reg = `0x${o.toString(16)}`;
       if (o === 0x00) reg = 'INIT_MODE';
       else if (o === 0x08) reg = 'INTR';
@@ -1272,18 +1404,27 @@ async function runRomBootRun(args: string[]) {
     }
     miWrite(o, v);
   };
+  const miRead = bus.mi.readU32.bind(bus.mi) as (off: number) => number;
+  (bus.mi as any).readU32 = (off: number) => {
+    const o = off >>> 0;
+    const v = miRead(o) >>> 0;
+    if (traceBoot>0 && monitorActive && allowEvent('mi') && o === 0x08) {
+      events.push({ type:'mi', reg:'INTR_RD', val:`0x${v.toString(16)}`, cyc: sys.cycle });
+    }
+    return v >>> 0;
+  };
 
   // RI instrumentation: auto-clear RI_MODE shortly after write to simulate RDRAM init complete
   const riWrite = bus.ri.writeU32.bind(bus.ri) as (off: number, val: number) => void;
   (bus.ri as any).writeU32 = (off: number, val: number) => {
     const o = off >>> 0; const v = val >>> 0;
-    if (traceBoot>0) events.push({ type:'ri', reg:`0x${o.toString(16)}`, val:`0x${v.toString(16)}`, cyc: sys.cycle });
+    if (traceBoot>0 && allowEvent('ri')) events.push({ type:'ri', reg:`0x${o.toString(16)}`, val:`0x${v.toString(16)}`, cyc: sys.cycle });
     riWrite(o, v);
     if (o === 0x00) {
       const when = (sys.cycle + 256) >>> 0;
       sys.scheduleAt(when, () => {
         (bus.ri as any).mode = 0 >>> 0;
-        if (traceBoot>0) events.push({ type:'ri', reg:'MODE_AUTO_CLEAR', val:'0x0', cyc: sys.cycle });
+        if (traceBoot>0 && allowEvent('ri')) events.push({ type:'ri', reg:'MODE_AUTO_CLEAR', val:'0x0', cyc: sys.cycle });
       });
     }
   };
@@ -1390,15 +1531,268 @@ async function runRomBootRun(args: string[]) {
     (bus.vi as any).writeU32(0x18, width >>> 0);    // VI_WIDTH_OFF
   }
 
+  // Optional: force an SP gfx task injection at a specified cycle (diagnostic)
+  if (forceSpAt > 0) {
+    const at = Math.max(1, forceSpAt >>> 0);
+    sys.scheduleAt(at, () => {
+      try {
+        // Ensure VI has a framebuffer
+        let fbOriginNow = viOrigin >>> 0;
+        if (fbOriginNow === 0) {
+          fbOriginNow = 0xF000 >>> 0;
+          (bus.vi as any).writeU32(0x14, fbOriginNow >>> 0);
+          (bus.vi as any).writeU32(0x18, width >>> 0);
+        }
+        // Reserve a small region after the framebuffer for assets and DL
+        const fbBytes = (width * height * 2) >>> 0;
+        const base = (fbOriginNow + fbBytes + 0x28000) >>> 0;
+        const tlutAddr = base >>> 0;
+        const pixAddr = (base + 0x1000) >>> 0;
+        const dlAddr = (base + 0x2000) >>> 0;
+        // TLUT: 256 entries, palette index 1 = green
+        const GREEN = ((0 << 11) | (31 << 6) | (0 << 1) | 1) >>> 0;
+        for (let i = 0; i < 256; i++) bus.storeU16((tlutAddr + i * 2) >>> 0, i === 1 ? GREEN : 0);
+        // CI8 texture 16x16 filled with index 1
+        const TW = 16, TH = 16;
+        for (let y = 0; y < TH; y++) for (let x = 0; x < TW; x++) bus.storeU8((pixAddr + (y * TW + x)) >>> 0, 1);
+        // Pack helpers
+        const pack12 = (hi: number, lo: number) => ((((hi & 0xFFF) << 12) | (lo & 0xFFF)) >>> 0);
+        const fp = (v: number) => ((v * 4) >>> 0);
+        let p = dlAddr >>> 0;
+        // G_LOADTLUT (0xF0)
+        bus.storeU32(p, (0xF0 << 24) | (256 & 0xFFFF)); p = (p + 4) >>> 0; bus.storeU32(p, tlutAddr >>> 0); p = (p + 4) >>> 0;
+        // G_SETTIMG (0xFD) siz=1 (CI8)
+        bus.storeU32(p, ((0xFD << 24) | (1 << 19)) >>> 0); p = (p + 4) >>> 0; bus.storeU32(p, pixAddr >>> 0); p = (p + 4) >>> 0;
+        // G_SETTILESIZE (0xF2)
+        bus.storeU32(p, ((0xF2 << 24) | pack12(fp(0), fp(0))) >>> 0); p = (p + 4) >>> 0; bus.storeU32(p, pack12(fp(TW - 1), fp(TH - 1)) >>> 0); p = (p + 4) >>> 0;
+        // G_TEXRECT (0xE4)
+        const X = 20, Y = 20; const W = TW, H = TH;
+        bus.storeU32(p, ((0xE4 << 24) | pack12(fp(X), fp(Y))) >>> 0); p = (p + 4) >>> 0; bus.storeU32(p, pack12(fp(X + W), fp(Y + H)) >>> 0); p = (p + 4) >>> 0;
+        // G_ENDDL (0xDF)
+        bus.storeU32(p, (0xDF << 24) >>> 0); p = (p + 4) >>> 0; bus.storeU32(p, 0);
+        // Write a minimal OSTask header into SP DMEM and start SP
+        const dmem = (bus.sp as any).dmem as Uint8Array;
+        const wbe = (arr: Uint8Array, off: number, v: number) => { arr[off] = (v >>> 24) & 0xFF; arr[off+1] = (v >>> 16) & 0xFF; arr[off+2] = (v >>> 8) & 0xFF; arr[off+3] = v & 0xFF; };
+        wbe(dmem, 0x00, 0x00000001); // type = 1 (gfx)
+        wbe(dmem, 0x04, 0x00000000); // flags
+        wbe(dmem, 0x08, 0x00000000); // ucode_boot
+        wbe(dmem, 0x0C, 0x00000000); // ucode_boot_size
+        wbe(dmem, 0x10, 0x00000000); // ucode
+        wbe(dmem, 0x14, 0x00000000); // ucode_size
+        wbe(dmem, 0x18, 0x00000000); // ucode_data
+        wbe(dmem, 0x1C, 0x00000000); // ucode_data_size
+        wbe(dmem, 0x20, 0x00000000); // dram_stack
+        wbe(dmem, 0x24, 0x00000000); // dram_stack_size
+        wbe(dmem, 0x28, 0x00000000); // output_buff
+        wbe(dmem, 0x2C, 0x00000000); // output_buff_size
+        wbe(dmem, 0x30, dlAddr >>> 0); // data_ptr
+        wbe(dmem, 0x34, 0x00000000); // data_size
+        wbe(dmem, 0x38, 0x00000000); // yield_data_ptr
+        wbe(dmem, 0x3C, 0x00000000); // yield_data_size
+        // Start SP (our stub treats writing MEM_ADDR=1 as start)
+        ;(bus.sp as any).writeU32(0x00, 1 >>> 0);
+      } catch {}
+    });
+  }
+
+  // Apply memory pokes before stepping (after staging, before any stepping)
+  const appliedPokes: { va: string; pa: string; val: string }[] = [];
+  if (poke32List) {
+    const items = poke32List.split(',').map(s => s.trim()).filter(Boolean);
+    for (const it of items) {
+      const m = it.split('=');
+      if (m.length === 2) {
+        const va = parseNum(m[0]!, 0) >>> 0;
+        const val = parseNum(m[1]!, 0) >>> 0;
+        const pa = vaToPhys(va);
+        if (pa !== null && (pa + 4) <= bus.rdram.bytes.length) {
+          bus.storeU32(pa >>> 0, val >>> 0);
+          appliedPokes.push({ va: `0x${va.toString(16)}`, pa: `0x${pa.toString(16)}`, val: `0x${val.toString(16)}` });
+        }
+      }
+    }
+  }
+
+  // Optional one-shot controller handshake to satisfy early input init (without fastboot)
+  if (pifHandshake && !fastbootHle) {
+    try {
+      const ctrlBase = 0x2000 >>> 0;
+      hlePifControllerStatus(bus, ctrlBase);
+      hlePifReadControllerState(bus, (ctrlBase + 0x40) >>> 0);
+    } catch {}
+  }
+
   // Schedule periodic VI vblank and snapshot if configured
   const frames: Uint8Array[] = [];
-  sys.scheduleEvery(viInterval >>> 0, viInterval >>> 0, Math.max(1, Math.floor(cycles / Math.max(1, viInterval))), () => {
-    bus.vi.vblank();
-    if (snapshot && viOrigin !== 0 && viWidth !== 0) {
-      const img = viScanout(bus, width, height);
-      frames.push(img);
+  // Schedule any requested timed pokes: "CYC:addr=val,addr=val;CYC2:..."
+  const scheduledPokes: { cyc: number; items: { va: string; pa: string|null; val: string }[] }[] = [];
+  if (poke32AtList) {
+    const groups = poke32AtList.split(';').map(s => s.trim()).filter(Boolean);
+    for (const g of groups) {
+      const [cycStr, rest] = g.split(':');
+      const cyc = parseNum(cycStr!, 0) >>> 0;
+      if (!rest) continue;
+      const itemsStr = rest.split(',').map(s => s.trim()).filter(Boolean);
+      const groupItems: { va: string; pa: string|null; val: string }[] = [];
+      sys.scheduleAt(Math.max(1, cyc), () => {
+        for (const it of itemsStr) {
+          const m = it.split('=');
+          if (m.length === 2) {
+            const va = parseNum(m[0]!, 0) >>> 0;
+            const val = parseNum(m[1]!, 0) >>> 0;
+            const pa = vaToPhys(va);
+            if (pa !== null && (pa + 4) <= bus.rdram.bytes.length) {
+              bus.storeU32(pa >>> 0, val >>> 0);
+              groupItems.push({ va: `0x${va.toString(16)}`, pa: `0x${pa.toString(16)}`, val: `0x${val.toString(16)}` });
+            } else {
+              groupItems.push({ va: `0x${va.toString(16)}`, pa: null, val: `0x${val.toString(16)}` });
+            }
+          }
+        }
+      });
+      scheduledPokes.push({ cyc, items: groupItems });
     }
-  });
+  }
+  if (!fastbootHle && !noViVblank) {
+    sys.scheduleEvery(viInterval >>> 0, viInterval >>> 0, Math.max(1, Math.floor(cycles / Math.max(1, viInterval))), () => {
+      bus.vi.vblank();
+      if (snapshot && viOrigin !== 0 && viWidth !== 0) {
+        const img = viScanout(bus, width, height);
+        frames.push(img);
+      }
+    });
+  }
+  // Optional PI kick DMA injection
+  if (kickPiCart !== null && kickPiDram !== null && kickPiLen !== null && kickPiLen > 0) {
+    const at = Math.max(1, kickPiAt >>> 0);
+    sys.scheduleAt(at, () => {
+      try {
+        (bus.pi as any).writeU32(0x04, kickPiCart >>> 0); // CART_ADDR
+        (bus.pi as any).writeU32(0x00, kickPiDram >>> 0); // DRAM_ADDR (KSEG0 ok; device uses low bits)
+        const lenMinus1 = ((kickPiLen - 1) & 0x00ffffff) >>> 0;
+        (bus.pi as any).writeU32(0x08, lenMinus1 >>> 0); // RD_LEN
+        if (traceBoot>0 && allowEvent('pi')) events.push({ type:'pi', reg:'KICK_PI', cart:`0x${(kickPiCart>>>0).toString(16)}`, dram:`0x${(kickPiDram>>>0).toString(16)}`, len:`0x${(kickPiLen>>>0).toString(16)}`, cyc: sys.cycle });
+      } catch {}
+    });
+  }
+
+  // Optional CP0 sampling
+  if (traceCp0) {
+    const period = Math.max(1, traceCp0Interval) >>> 0;
+    const repeats = Math.max(1, Math.floor(cycles / period));
+    sys.scheduleEvery(period, period, repeats, () => {
+      const status = cpu.cop0.read(12) >>> 0;
+      const cause = cpu.cop0.read(13) >>> 0;
+      const count = cpu.cop0.read(9) >>> 0;
+      const compare = cpu.cop0.read(11) >>> 0;
+      cp0Trace.push({
+        cyc: sys.cycle >>> 0,
+        status: `0x${status.toString(16)}`,
+        cause: `0x${cause.toString(16)}`,
+        count: `0x${count.toString(16)}`,
+        compare: `0x${compare.toString(16)}`,
+      });
+    });
+  }
+
+  // Optional memory dump before stepping (after staging)
+  let dump: { baseVA: string; count: number; words: { va: string; pa: string; w: string }[] } | undefined;
+  let disasm: { baseVA: string; count: number; inst: { va: string; pa: string; w: string; asm: string }[] } | undefined;
+  if (dumpWordsVA !== null) {
+    const pa0 = vaToPhys(dumpWordsVA >>> 0);
+    const words: { va: string; pa: string; w: string }[] = [];
+    if (pa0 !== null) {
+      for (let i = 0; i < dumpCount; i++) {
+        const pa = (pa0 + i * 4) >>> 0;
+        if (pa + 4 > bus.rdram.bytes.length) break;
+        const w = be32(bus.rdram.bytes, pa) >>> 0;
+        const va = (dumpWordsVA + i * 4) >>> 0;
+        words.push({ va: `0x${va.toString(16)}`, pa: `0x${pa.toString(16)}`, w: `0x${w.toString(16)}` });
+      }
+    }
+    dump = { baseVA: `0x${(dumpWordsVA>>>0).toString(16)}`, count: dumpCount, words };
+  }
+
+  // Optional disassembler before stepping
+  if (disasmVA !== null && disasmCount > 0) {
+    const pa0 = vaToPhys(disasmVA >>> 0);
+    const inst: { va: string; pa: string; w: string; asm: string }[] = [];
+    const regNames = [
+      '$zero','$at','$v0','$v1','$a0','$a1','$a2','$a3',
+      '$t0','$t1','$t2','$t3','$t4','$t5','$t6','$t7',
+      '$s0','$s1','$s2','$s3','$s4','$s5','$s6','$s7',
+      '$t8','$t9','$k0','$k1','$gp','$sp','$s8','$ra',
+    ];
+    function sign16(n: number) { return (n & 0x8000) ? (n | 0xFFFF0000) : (n & 0xFFFF); }
+    function hex(n: number) { return '0x' + ((n>>>0)>>>0).toString(16); }
+    function fmtTarget(pc: number, imm26: number) { const t = (((pc + 4) & 0xF0000000) | ((imm26 & 0x03FFFFFF) << 2)) >>> 0; return hex(t); }
+    function fmtBranch(pc: number, imm16: number) { const off = (sign16(imm16) << 2) >>> 0; const t = ((pc + 4 + off) >>> 0); return hex(t); }
+    function dis1(pc: number, w: number): string {
+      const op = (w >>> 26) & 0x3F;
+      const rs = (w >>> 21) & 0x1F;
+      const rt = (w >>> 16) & 0x1F;
+      const rd = (w >>> 11) & 0x1F;
+      const sa = (w >>> 6) & 0x1F;
+      const func = w & 0x3F;
+      const imm16 = w & 0xFFFF;
+      switch (op) {
+        case 0x00: // SPECIAL
+          switch (func) {
+            case 0x21: return `addu ${regNames[rd]}, ${regNames[rs]}, ${regNames[rt]}`;
+            case 0x23: return `subu ${regNames[rd]}, ${regNames[rs]}, ${regNames[rt]}`;
+            case 0x24: return `and ${regNames[rd]}, ${regNames[rs]}, ${regNames[rt]}`;
+            case 0x25: return `or ${regNames[rd]}, ${regNames[rs]}, ${regNames[rt]}`;
+            case 0x27: return `nor ${regNames[rd]}, ${regNames[rs]}, ${regNames[rt]}`;
+            case 0x02: return `srl ${regNames[rd]}, ${regNames[rt]}, ${sa}`;
+            case 0x03: return `sra ${regNames[rd]}, ${regNames[rt]}, ${sa}`;
+            case 0x08: return `jr ${regNames[rs]}`;
+            default: return `.word ${hex(w)}`;
+          }
+        case 0x02: return `j ${fmtTarget(pc, w & 0x03FFFFFF)}`;
+        case 0x03: return `jal ${fmtTarget(pc, w & 0x03FFFFFF)}`;
+        case 0x04: return `beq ${regNames[rs]}, ${regNames[rt]}, ${fmtBranch(pc, imm16)}`;
+        case 0x05: return `bne ${regNames[rs]}, ${regNames[rt]}, ${fmtBranch(pc, imm16)}`;
+        case 0x06: return `blez ${regNames[rs]}, ${fmtBranch(pc, imm16)}`;
+        case 0x07: return `bgtz ${regNames[rs]}, ${fmtBranch(pc, imm16)}`;
+        case 0x08: return `addi ${regNames[rt]}, ${regNames[rs]}, ${sign16(imm16)}`;
+        case 0x09: return `addiu ${regNames[rt]}, ${regNames[rs]}, ${sign16(imm16)}`;
+        case 0x0C: return `andi ${regNames[rt]}, ${regNames[rs]}, ${hex(imm16)}`;
+        case 0x0D: return `ori ${regNames[rt]}, ${regNames[rs]}, ${hex(imm16)}`;
+        case 0x0E: return `xori ${regNames[rt]}, ${regNames[rs]}, ${hex(imm16)}`;
+        case 0x0F: return `lui ${regNames[rt]}, ${hex(imm16)}`;
+        case 0x20: return `lb ${regNames[rt]}, ${sign16(imm16)}(${regNames[rs]})`;
+        case 0x21: return `lh ${regNames[rt]}, ${sign16(imm16)}(${regNames[rs]})`;
+        case 0x23: return `lw ${regNames[rt]}, ${sign16(imm16)}(${regNames[rs]})`;
+        case 0x24: return `lbu ${regNames[rt]}, ${sign16(imm16)}(${regNames[rs]})`;
+        case 0x25: return `lhu ${regNames[rt]}, ${sign16(imm16)}(${regNames[rs]})`;
+        case 0x28: return `sb ${regNames[rt]}, ${sign16(imm16)}(${regNames[rs]})`;
+        case 0x29: return `sh ${regNames[rt]}, ${sign16(imm16)}(${regNames[rs]})`;
+        case 0x2B: return `sw ${regNames[rt]}, ${sign16(imm16)}(${regNames[rs]})`;
+        case 0x10: { // COP0
+          const rs_cop0 = (w >>> 21) & 0x1F;
+          if (rs_cop0 === 0x00) { // mfc0
+            return `mfc0 ${regNames[rt]}, $${rd}`;
+          } else if (rs_cop0 === 0x04) { // mtc0
+            return `mtc0 ${regNames[rt]}, $${rd}`;
+          } else {
+            return `.word ${hex(w)}`;
+          }
+        }
+        default: return `.word ${hex(w)}`;
+      }
+    }
+    if (pa0 !== null) {
+      for (let i = 0; i < disasmCount; i++) {
+        const pa = (pa0 + i * 4) >>> 0;
+        if (pa + 4 > bus.rdram.bytes.length) break;
+        const w = be32(bus.rdram.bytes, pa) >>> 0;
+        const va = (disasmVA + i * 4) >>> 0;
+        const asm = dis1(va >>> 0, w >>> 0);
+        inst.push({ va: `0x${va.toString(16)}`, pa: `0x${pa.toString(16)}`, w: `0x${w.toString(16)}`, asm });
+      }
+    }
+    disasm = { baseVA: `0x${(disasmVA>>>0).toString(16)}`, count: disasmCount, inst };
+  }
 
   // Step CPU for requested cycles; trap errors to report gracefully
   let stopReason: string | null = null;
@@ -1409,6 +1803,29 @@ async function runRomBootRun(args: string[]) {
     stopReason = String(e?.message || e);
   } finally {
     monitorActive = false;
+  }
+
+  // Optional memory dump after stepping (supports comma-separated base VAs)
+  let dumpAfter: { baseVA: string; count: number; words: { va: string; pa: string; w: string }[] }[] | undefined;
+  if (dumpWordsAfterList) {
+    const addrs = dumpWordsAfterList.split(',').map(s => s.trim()).filter(Boolean);
+    const outArr: { baseVA: string; count: number; words: { va: string; pa: string; w: string }[] }[] = [];
+    for (const aStr of addrs) {
+      const base = parseNum(aStr, 0) >>> 0;
+      const pa0 = vaToPhys(base >>> 0);
+      const words: { va: string; pa: string; w: string }[] = [];
+      if (pa0 !== null) {
+        for (let i = 0; i < dumpCountAfter; i++) {
+          const pa = (pa0 + i * 4) >>> 0;
+          if (pa + 4 > bus.rdram.bytes.length) break;
+          const w = be32(bus.rdram.bytes, pa) >>> 0;
+          const va = (base + i * 4) >>> 0;
+          words.push({ va: `0x${va.toString(16)}`, pa: `0x${pa.toString(16)}`, w: `0x${w.toString(16)}` });
+        }
+      }
+      outArr.push({ baseVA: `0x${(base>>>0).toString(16)}`, count: dumpCountAfter, words });
+    }
+    dumpAfter = outArr;
   }
 
   // If discovering and no PI activity, try multi-window heuristic reattempts
@@ -1502,7 +1919,7 @@ async function runRomBootRun(args: string[]) {
     viInterval,
     frames: frames.length,
     vi: { origin: viOrigin >>> 0, width: viWidth >>> 0 },
-    events: { spStarts, spStatusWrites, spLastStatus: `0x${(spLastStatusVal>>>0).toString(16)}`, piDmas: piReads, miInitModeWrites, miIntrWrites, miIntrMaskWrites, viStatusWrites, viOriginWrites, viWidthWrites, dpStatusWrites, dpIntrAcks, spRdDmas: spRdCount, spWrDmas: spWrCount, siWr64: siWr64Count, siRd64: siRd64Count },
+    events: { spStarts, spStatusWrites, spLastStatus: `0x${(spLastStatusVal>>>0).toString(16)}`, piDmas: piReads, piStatusWrites, piStatusReads, piStatusReadsBusy, piStatusLast: `0x${(piStatusReadLast>>>0).toString(16)}`, miInitModeWrites, miIntrWrites, miIntrMaskWrites, viStatusWrites, viOriginWrites, viWidthWrites, dpStatusWrites, dpIntrAcks, spRdDmas: spRdCount, spWrDmas: spWrCount, siWr64: siWr64Count, siRd64: siRd64Count },
     ostasks: ostasks.length ? ostasks : undefined,
     stopReason: stopReason || null,
     snapshot: snapshot || null,
@@ -1512,6 +1929,13 @@ async function runRomBootRun(args: string[]) {
     jumpedToHeader: jumpedToHeader || undefined,
     trace: traceBoot > 0 ? trace : undefined,
     deviceEvents: traceBoot > 0 ? events : undefined,
+    cpuWarnings: cpuWarnings.length ? cpuWarnings : undefined,
+    cp0Trace: traceCp0 ? cp0Trace : undefined,
+    dump,
+    disasm,
+    pokes: appliedPokes.length ? appliedPokes : undefined,
+    scheduledPokes: scheduledPokes.length ? scheduledPokes : undefined,
+    dumpAfter: dumpAfter && dumpAfter.length ? dumpAfter : undefined,
   }, null, 2));
 }
 

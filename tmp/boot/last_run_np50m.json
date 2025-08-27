@@ -1,0 +1,46 @@
+[discover] wrote boot script to tmp/boot/discovered_np50m.json
+{
+  "command": "rom-boot-run",
+  "rom": "mario64.z64",
+  "entryPC": 2751463488,
+  "headerInitialPC": 2149867520,
+  "endPC": 2147483980,
+  "cycles": 50000000,
+  "viInterval": 10000,
+  "frames": 0,
+  "vi": {
+    "origin": 0,
+    "width": 0
+  },
+  "events": {
+    "spStarts": 0,
+    "spStatusWrites": 0,
+    "spLastStatus": "0x0",
+    "piDmas": 0,
+    "miInitModeWrites": 1,
+    "miIntrWrites": 0,
+    "miIntrMaskWrites": 0,
+    "viStatusWrites": 0,
+    "viOriginWrites": 0,
+    "viWidthWrites": 0,
+    "dpStatusWrites": 0,
+    "dpIntrAcks": 0,
+    "spRdDmas": 0,
+    "spWrDmas": 0,
+    "siWr64": 0,
+    "siRd64": 0
+  },
+  "stopReason": null,
+  "snapshot": null,
+  "discovered": [],
+  "cpuWarnings": [
+    {
+      "pc": "0x2044",
+      "instr": "0x5fb0000",
+      "kind": "regimm_unknown_rt",
+      "details": {
+        "rt": "0x1b"
+      }
+    }
+  ]
+}

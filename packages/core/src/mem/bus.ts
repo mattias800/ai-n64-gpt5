@@ -155,6 +155,13 @@ export class Bus {
     if (this.writeMMIO(mmAligned, (value & 0xff) << ((3 - mmOff) * 8))) return;
     if (p < this.rdram.bytes.length) {
       this.rdram.bytes[p] = value & 0xff;
+      // debug: watch stores to test-data windows if enabled
+      if (process.env.N64_TESTS_DEBUG) {
+        if ((p >= 0x98f8 && p < 0x98f8 + 8) || (p >= 0xa578 && p < 0xa578 + 8)) {
+          // eslint-disable-next-line no-console
+          console.log(`[bus.storeU8] p=0x${p.toString(16)} v=0x${(value & 0xff).toString(16).padStart(2,'0')}`);
+        }
+      }
     }
   }
 
@@ -166,6 +173,12 @@ export class Bus {
     if (this.writeMMIO(mmAligned, (value & 0xffff) << (mmOff2 === 0 ? 16 : 0))) return;
     if (p + 2 <= this.rdram.bytes.length) {
       writeU16BE(this.rdram.bytes, p, value >>> 0);
+      if (process.env.N64_TESTS_DEBUG) {
+        if ((p >= 0x98f8 && p < 0x98f8 + 8) || (p >= 0xa578 && p < 0xa578 + 8)) {
+          // eslint-disable-next-line no-console
+          console.log(`[bus.storeU16] p=0x${p.toString(16)} v=0x${(value & 0xffff).toString(16).padStart(4,'0')}`);
+        }
+      }
     }
   }
 
@@ -174,6 +187,12 @@ export class Bus {
     if (this.writeMMIO(p, value >>> 0)) return;
     if (p + 4 <= this.rdram.bytes.length) {
       writeU32BE(this.rdram.bytes, p, value >>> 0);
+      if (process.env.N64_TESTS_DEBUG) {
+        if ((p >= 0x98f8 && p < 0x98f8 + 8) || (p >= 0xa578 && p < 0xa578 + 8)) {
+          // eslint-disable-next-line no-console
+          console.log(`[bus.storeU32] p=0x${p.toString(16)} v=0x${(value >>> 0).toString(16).padStart(8,'0')}`);
+        }
+      }
       return;
     }
     // Ignore for now; later raise exceptions/MI
