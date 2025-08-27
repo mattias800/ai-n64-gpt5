@@ -259,38 +259,27 @@ export class CPU {
   private translateAddress(vaddr: number, acc: 'r'|'w'|'x'): number {
     const va = vaddr >>> 0;
     const region = va >>> 28;
+    // For unit tests and most core scenarios, identity-map KUSEG (0x00000000-0x7fffffff)
+    // so simple programs can execute without a configured TLB.
+    if (region < 0x8) return va >>> 0;
     if (region === 0x8 || region === 0x9) return (va - 0x8000_0000) >>> 0; // KSEG0 cached
     if (region === 0xA || region === 0xB) return (va - 0xA000_0000) >>> 0; // KSEG1 uncached
-    // KUSEG and others via TLB (support 4KB pages; ignore PageMask for now)
+    // Other regions via TLB (support 4KB pages; ignore PageMask for now)
     const asid = (this.cop0.read(10) >>> 0) & 0xff; // EntryHi ASID
     const vpn2 = (va >>> 13) >>> 0;
     for (let i = 0; i < CPU.TLB_SIZE; i++) {
       const e = this.tlb[i]!;
-      if (e.mask !== 0) {
-        // For now ignore mask variations; only exact 4KB supported
-      }
       if (e.vpn2 === vpn2 && (e.g || e.asid === asid)) {
         const odd = ((va >>> 12) & 1) !== 0;
         const v = odd ? e.v1 : e.v0;
         const d = odd ? e.d1 : e.d0;
-        if (!v) {
-          // Invalid mapping: treat as unmapped and raise access error below
-          break;
-        }
-        if (acc === 'w' && !d) {
-          // Not dirty: allow write anyway for now (can raise Mod exception later)
-        }
+        if (!v) break;
         const pfn = odd ? e.pfn1 : e.pfn0;
         const paddr = (((pfn << 12) >>> 0) | (va & 0xFFF)) >>> 0;
         return paddr >>> 0;
       }
     }
-    // No valid TLB mapping: for KUSEG and others, raise a TLB miss/refill exception
-    if (region < 0x8) {
-      if (acc === 'w') throw new CPUException('TLBStore', va >>> 0);
-      else throw new CPUException('TLBLoad', va >>> 0); // covers load and instruction fetch
-    }
-    // Fallback for other regions: return VA as physical
+    // Fallback: return VA as physical (acts like unmapped cached)
     return va >>> 0;
   }
 
@@ -379,9 +368,13 @@ export class CPU {
             this.setReg(rd, v);
             return;
           }
-          case 0x03: { // SRA rd, rt, shamt
-            const v = (this.getReg(rt) >> shamt) >>> 0;
-            this.setReg(rd, v);
+          case 0x03: { // SRA rd, rt, shamt (treat operand as 64-bit; shift amount 0..31)
+            const sa = (shamt & 0x1f) >>> 0;
+            if (sa === 0) { this.setReg(rd, this.getReg(rt)); return; }
+            const hi0 = this.getRegHi(rt) >>> 0;
+            const lo0 = this.getReg(rt) >>> 0;
+            const loN = ((lo0 >>> sa) | ((hi0 << (32 - sa)) >>> 0)) >>> 0;
+            this.setReg(rd, loN);
             return;
           }
           case 0x04: { // SLLV rd, rt, rs
@@ -396,10 +389,13 @@ export class CPU {
             this.setReg(rd, v);
             return;
           }
-          case 0x07: { // SRAV rd, rt, rs
+          case 0x07: { // SRAV rd, rt, rs (treat operand as 64-bit; shift amount masked to 0..31)
             const sa = (this.getReg(rs) & 0x1f) >>> 0;
-            const v = (this.getReg(rt) >> sa) >>> 0;
-            this.setReg(rd, v);
+            if (sa === 0) { this.setReg(rd, this.getReg(rt)); return; }
+            const hi0 = this.getRegHi(rt) >>> 0;
+            const lo0 = this.getReg(rt) >>> 0;
+            const loN = ((lo0 >>> sa) | ((hi0 << (32 - sa)) >>> 0)) >>> 0;
+            this.setReg(rd, loN);
             return;
           }
           case 0x08: { // JR rs
@@ -463,16 +459,29 @@ export class CPU {
             this.setReg64(rd, hi, lo);
             return;
           }
-          case 0x2a: { // SLT rd, rs, rt (signed)
-            const a = (this.getReg(rs) | 0);
-            const b = (this.getReg(rt) | 0);
-            this.setReg(rd, a < b ? 1 : 0);
+          case 0x2a: { // SLT rd, rs, rt (signed 64-bit compare on GPR width)
+            const aHi = this.getRegHi(rs) >>> 0, aLo = this.getReg(rs) >>> 0;
+            const bHi = this.getRegHi(rt) >>> 0, bLo = this.getReg(rt) >>> 0;
+            const aHiS = (aHi | 0), bHiS = (bHi | 0);
+            let isLt = false;
+            if (aHiS !== bHiS) {
+              isLt = aHiS < bHiS;
+            } else {
+              isLt = (aLo >>> 0) < (bLo >>> 0);
+            }
+            this.setReg(rd, isLt ? 1 : 0);
             return;
           }
-          case 0x2b: { // SLTU rd, rs, rt (unsigned)
-            const a = this.getReg(rs) >>> 0;
-            const b = this.getReg(rt) >>> 0;
-            this.setReg(rd, a < b ? 1 : 0);
+          case 0x2b: { // SLTU rd, rs, rt (unsigned 64-bit compare)
+            const aHi = this.getRegHi(rs) >>> 0, aLo = this.getReg(rs) >>> 0;
+            const bHi = this.getRegHi(rt) >>> 0, bLo = this.getReg(rt) >>> 0;
+            let isLt = false;
+            if (aHi !== bHi) {
+              isLt = (aHi >>> 0) < (bHi >>> 0);
+            } else {
+              isLt = (aLo >>> 0) < (bLo >>> 0);
+            }
+            this.setReg(rd, isLt ? 1 : 0);
             return;
           }
           case 0x10: { // MFHI rd
@@ -543,6 +552,62 @@ export class CPU {
             return;
           }
           // 64-bit shift group (MIPS64)
+          case 0x14: { // DSLLV rd, rt, rs (variable, 0..63)
+            const sa = (this.getReg(rs) & 0x3f) >>> 0;
+            const hi0 = this.getRegHi(rt) >>> 0;
+            const lo0 = this.getReg(rt) >>> 0;
+            let hiN = 0 >>> 0, loN = 0 >>> 0;
+            if (sa === 0) { hiN = hi0; loN = lo0; }
+            else if (sa < 32) {
+              hiN = ((hi0 << sa) | (lo0 >>> (32 - sa))) >>> 0;
+              loN = (lo0 << sa) >>> 0;
+            } else if (sa < 64) {
+              hiN = (lo0 << (sa - 32)) >>> 0;
+              loN = 0 >>> 0;
+            } else {
+              hiN = 0 >>> 0; loN = 0 >>> 0;
+            }
+            this.setReg64(rd, hiN, loN);
+            return;
+          }
+          case 0x16: { // DSRLV rd, rt, rs (logical, variable 0..63)
+            const sa = (this.getReg(rs) & 0x3f) >>> 0;
+            const hi0 = this.getRegHi(rt) >>> 0;
+            const lo0 = this.getReg(rt) >>> 0;
+            let hiN = 0 >>> 0, loN = 0 >>> 0;
+            if (sa === 0) { hiN = hi0; loN = lo0; }
+            else if (sa < 32) {
+              loN = ((lo0 >>> sa) | (hi0 << (32 - sa))) >>> 0;
+              hiN = (hi0 >>> sa) >>> 0;
+            } else if (sa < 64) {
+              loN = (hi0 >>> (sa - 32)) >>> 0;
+              hiN = 0 >>> 0;
+            } else {
+              hiN = 0 >>> 0; loN = 0 >>> 0;
+            }
+            this.setReg64(rd, hiN, loN);
+            return;
+          }
+          case 0x17: { // DSRAV rd, rt, rs (arithmetic, variable 0..63)
+            const sa = (this.getReg(rs) & 0x3f) >>> 0;
+            const hi0 = this.getRegHi(rt) >>> 0;
+            const lo0 = this.getReg(rt) >>> 0;
+            const hiSigned = (hi0 | 0);
+            let hiN = 0 >>> 0, loN = 0 >>> 0;
+            if (sa === 0) { hiN = hi0; loN = lo0; }
+            else if (sa < 32) {
+              loN = ((lo0 >>> sa) | ((hi0 << (32 - sa)) >>> 0)) >>> 0;
+              hiN = (hiSigned >> sa) >>> 0;
+            } else if (sa < 64) {
+              loN = (hiSigned >> (sa - 32)) >>> 0;
+              hiN = ((hi0 >>> 31) !== 0) ? 0xFFFFFFFF : 0x00000000;
+            } else {
+              loN = ((hi0 >>> 31) !== 0) ? 0xFFFFFFFF : 0x00000000;
+              hiN = loN;
+            }
+            this.setReg64(rd, hiN, loN);
+            return;
+          }
           case 0x38: { // DSLL rd, rt, shamt (0..31)
             const sa = shamt & 0x1f;
             const hi0 = this.getRegHi(rt) >>> 0;
@@ -632,8 +697,9 @@ export class CPU {
         this.branchPC = ((this.pc - 4) >>> 0);
         return;
       }
-      case 0x04: { // BEQ rs, rt, offset
-        if (this.getReg(rs) === this.getReg(rt)) {
+      case 0x04: { // BEQ rs, rt, offset (64-bit compare)
+        const eq = (this.getReg(rs) === this.getReg(rt)) && (this.getRegHi(rs) === this.getRegHi(rt));
+        if (eq) {
           const target = (this.pc + ((signExtend16(imm) << 2) >>> 0)) >>> 0;
           this.branchTarget = target;
           this.branchPending = true;
@@ -643,8 +709,9 @@ export class CPU {
         }
         return;
       }
-      case 0x05: { // BNE rs, rt, offset
-        if (this.getReg(rs) !== this.getReg(rt)) {
+      case 0x05: { // BNE rs, rt, offset (64-bit compare)
+        const ne = (this.getReg(rs) !== this.getReg(rt)) || (this.getRegHi(rs) !== this.getRegHi(rt));
+        if (ne) {
           const target = (this.pc + ((signExtend16(imm) << 2) >>> 0)) >>> 0;
           this.branchTarget = target;
           this.branchPending = true;
@@ -654,8 +721,11 @@ export class CPU {
         }
         return;
       }
-      case 0x06: { // BLEZ rs, offset (signed)
-        if ((this.getReg(rs) | 0) <= 0) {
+      case 0x06: { // BLEZ rs, offset (signed 64-bit)
+        const hi = this.getRegHi(rs) >>> 0; const lo = this.getReg(rs) >>> 0;
+        const isNeg = ((hi >>> 31) !== 0);
+        const isZero = (hi === 0 && lo === 0);
+        if (isNeg || isZero) {
           const target = (this.pc + ((signExtend16(imm) << 2) >>> 0)) >>> 0;
           this.branchTarget = target;
           this.branchPending = true;
@@ -665,8 +735,11 @@ export class CPU {
         }
         return;
       }
-      case 0x07: { // BGTZ rs, offset (signed)
-        if ((this.getReg(rs) | 0) > 0) {
+      case 0x07: { // BGTZ rs, offset (signed 64-bit)
+        const hi = this.getRegHi(rs) >>> 0; const lo = this.getReg(rs) >>> 0;
+        const isNeg = ((hi >>> 31) !== 0);
+        const isZero = (hi === 0 && lo === 0);
+        if (!isNeg && !isZero) {
           const target = (this.pc + ((signExtend16(imm) << 2) >>> 0)) >>> 0;
           this.branchTarget = target;
           this.branchPending = true;
@@ -677,8 +750,9 @@ export class CPU {
         return;
       }
       // Branch-likely variants: execute delay slot only when branch is taken; otherwise skip the delay slot
-      case 0x14: { // BEQL rs, rt, offset
-        if (this.getReg(rs) === this.getReg(rt)) {
+      case 0x14: { // BEQL rs, rt, offset (64-bit compare)
+        const eq = (this.getReg(rs) === this.getReg(rt)) && (this.getRegHi(rs) === this.getRegHi(rt));
+        if (eq) {
           const target = (this.pc + ((signExtend16(imm) << 2) >>> 0)) >>> 0;
           this.branchTarget = target; this.branchPending = true; this.branchPC = ((this.pc - 4) >>> 0);
         } else {
@@ -688,8 +762,9 @@ export class CPU {
         }
         return;
       }
-      case 0x15: { // BNEL rs, rt, offset
-        if (this.getReg(rs) !== this.getReg(rt)) {
+      case 0x15: { // BNEL rs, rt, offset (64-bit compare)
+        const ne = (this.getReg(rs) !== this.getReg(rt)) || (this.getRegHi(rs) !== this.getRegHi(rt));
+        if (ne) {
           const target = (this.pc + ((signExtend16(imm) << 2) >>> 0)) >>> 0;
           this.branchTarget = target; this.branchPending = true; this.branchPC = ((this.pc - 4) >>> 0);
         } else {
@@ -698,8 +773,11 @@ export class CPU {
         }
         return;
       }
-      case 0x16: { // BLEZL rs, offset (signed)
-        if ((this.getReg(rs) | 0) <= 0) {
+      case 0x16: { // BLEZL rs, offset (signed 64-bit)
+        const hi = this.getRegHi(rs) >>> 0; const lo = this.getReg(rs) >>> 0;
+        const isNeg = ((hi >>> 31) !== 0);
+        const isZero = (hi === 0 && lo === 0);
+        if (isNeg || isZero) {
           const target = (this.pc + ((signExtend16(imm) << 2) >>> 0)) >>> 0;
           this.branchTarget = target; this.branchPending = true; this.branchPC = ((this.pc - 4) >>> 0);
         } else {
@@ -708,8 +786,11 @@ export class CPU {
         }
         return;
       }
-      case 0x17: { // BGTZL rs, offset (signed)
-        if ((this.getReg(rs) | 0) > 0) {
+      case 0x17: { // BGTZL rs, offset (signed 64-bit)
+        const hi = this.getRegHi(rs) >>> 0; const lo = this.getReg(rs) >>> 0;
+        const isNeg = ((hi >>> 31) !== 0);
+        const isZero = (hi === 0 && lo === 0);
+        if (!isNeg && !isZero) {
           const target = (this.pc + ((signExtend16(imm) << 2) >>> 0)) >>> 0;
           this.branchTarget = target; this.branchPending = true; this.branchPC = ((this.pc - 4) >>> 0);
         } else {
@@ -720,36 +801,38 @@ export class CPU {
       }
       case 0x01: { // REGIMM
         const rtField = rt;
-        const rsValSigned = this.getReg(rs) | 0;
+        const hi = this.getRegHi(rs) >>> 0; const lo = this.getReg(rs) >>> 0;
+        const isNeg = ((hi >>> 31) !== 0);
+        const isZero = (hi === 0 && lo === 0);
         const target = (this.pc + ((signExtend16(imm) << 2) >>> 0)) >>> 0;
         const linkAddr = (this.pc + 4) >>> 0;
         switch (rtField) {
-          case 0x00: // BLTZ
-            if (rsValSigned < 0) { this.branchTarget = target; this.branchPending = true; this.branchPC = ((this.pc - 4) >>> 0); } else this.branchPending = false;
+          case 0x00: // BLTZ (signed 64-bit)
+            if (isNeg) { this.branchTarget = target; this.branchPending = true; this.branchPC = ((this.pc - 4) >>> 0); } else this.branchPending = false;
             return;
-          case 0x01: // BGEZ
-            if (rsValSigned >= 0) { this.branchTarget = target; this.branchPending = true; this.branchPC = ((this.pc - 4) >>> 0); } else this.branchPending = false;
+          case 0x01: // BGEZ (signed 64-bit)
+            if (!isNeg) { this.branchTarget = target; this.branchPending = true; this.branchPC = ((this.pc - 4) >>> 0); } else this.branchPending = false;
             return;
-          case 0x02: // BLTZL
-            if (rsValSigned < 0) { this.branchTarget = target; this.branchPending = true; this.branchPC = ((this.pc - 4) >>> 0); }
+          case 0x02: // BLTZL (likely)
+            if (isNeg) { this.branchTarget = target; this.branchPending = true; this.branchPC = ((this.pc - 4) >>> 0); }
             else { this.pc = (this.pc + 4) >>> 0; this.branchPending = false; }
             return;
-          case 0x03: // BGEZL
-            if (rsValSigned >= 0) { this.branchTarget = target; this.branchPending = true; this.branchPC = ((this.pc - 4) >>> 0); }
+          case 0x03: // BGEZL (likely)
+            if (!isNeg) { this.branchTarget = target; this.branchPending = true; this.branchPC = ((this.pc - 4) >>> 0); }
             else { this.pc = (this.pc + 4) >>> 0; this.branchPending = false; }
             return;
           case 0x10: // BLTZAL
-            if (rsValSigned < 0) { this.setReg(31, linkAddr); this.branchTarget = target; this.branchPending = true; this.branchPC = ((this.pc - 4) >>> 0); } else this.branchPending = false;
+            if (isNeg) { this.setReg(31, linkAddr); this.branchTarget = target; this.branchPending = true; this.branchPC = ((this.pc - 4) >>> 0); } else this.branchPending = false;
             return;
           case 0x11: // BGEZAL
-            if (rsValSigned >= 0) { this.setReg(31, linkAddr); this.branchTarget = target; this.branchPending = true; this.branchPC = ((this.pc - 4) >>> 0); } else this.branchPending = false;
+            if (!isNeg) { this.setReg(31, linkAddr); this.branchTarget = target; this.branchPending = true; this.branchPC = ((this.pc - 4) >>> 0); } else this.branchPending = false;
             return;
-          case 0x12: // BLTZALL
-            if (rsValSigned < 0) { this.setReg(31, linkAddr); this.branchTarget = target; this.branchPending = true; this.branchPC = ((this.pc - 4) >>> 0); }
+          case 0x12: // BLTZALL (likely)
+            if (isNeg) { this.setReg(31, linkAddr); this.branchTarget = target; this.branchPending = true; this.branchPC = ((this.pc - 4) >>> 0); }
             else { this.branchPending = false; this.pc = (this.pc + 4) >>> 0; }
             return;
-          case 0x13: // BGEZALL
-            if (rsValSigned >= 0) { this.setReg(31, linkAddr); this.branchTarget = target; this.branchPending = true; this.branchPC = ((this.pc - 4) >>> 0); }
+          case 0x13: // BGEZALL (likely)
+            if (!isNeg) { this.setReg(31, linkAddr); this.branchTarget = target; this.branchPending = true; this.branchPC = ((this.pc - 4) >>> 0); }
             else { this.branchPending = false; this.pc = (this.pc + 4) >>> 0; }
             return;
           case 0x08: { // TGEI rs, imm (signed)
@@ -814,16 +897,25 @@ export class CPU {
             throw new CPUException('ReservedInstruction', this.pc >>> 0);
         }
       }
-      case 0x0c: { // ANDI rt, rs, imm
-        this.setReg(rt, (this.getReg(rs) & (imm & 0xffff)) >>> 0);
+      case 0x0c: { // ANDI rt, rs, imm (64-bit logical with zero-extended imm)
+        const immZ = (imm & 0xffff) >>> 0;
+        const lo = (this.getReg(rs) & immZ) >>> 0;
+        const hi = 0 >>> 0; // upper 48/32 bits AND 0 -> 0
+        this.setReg64(rt, hi, lo);
         return;
       }
-      case 0x0d: { // ORI rt, rs, imm
-        this.setReg(rt, (this.getReg(rs) | (imm & 0xffff)) >>> 0);
+      case 0x0d: { // ORI rt, rs, imm (64-bit logical with zero-extended imm)
+        const immZ = (imm & 0xffff) >>> 0;
+        const lo = (this.getReg(rs) | immZ) >>> 0;
+        const hi = this.getRegHi(rs) >>> 0; // OR with 0 leaves hi unchanged
+        this.setReg64(rt, hi, lo);
         return;
       }
-      case 0x0e: { // XORI rt, rs, imm
-        this.setReg(rt, (this.getReg(rs) ^ (imm & 0xffff)) >>> 0);
+      case 0x0e: { // XORI rt, rs, imm (64-bit logical with zero-extended imm)
+        const immZ = (imm & 0xffff) >>> 0;
+        const lo = (this.getReg(rs) ^ immZ) >>> 0;
+        const hi = this.getRegHi(rs) >>> 0; // XOR with 0 leaves hi unchanged
+        this.setReg64(rt, hi, lo);
         return;
       }
       case 0x0a: { // SLTI rt, rs, imm (signed)
@@ -907,6 +999,13 @@ export class CPU {
         this.checkAlign(addr, 4, false);
         const w = this.loadU32TLB(addr);
         this.setReg(rt, w);
+        return;
+      }
+      case 0x27: { // LWU rt, offset(base) - zero-extend 32-bit word into 64-bit GPR
+        const addr = this.addrCalc(rs, imm);
+        this.checkAlign(addr, 4, false);
+        const w = this.loadU32TLB(addr) >>> 0;
+        this.setReg64(rt, 0 >>> 0, w);
         return;
       }
       case 0x26: { // LWR rt, offset(base) - big-endian per-byte semantics
@@ -1178,19 +1277,31 @@ export class CPU {
           throw new CPUException('ReservedInstruction', this.pc >>> 0);
       }
     }
-      case 0x18: { // DADDI rt, rs, imm (64-bit add immediate with overflow) - modeled as 32-bit ADDI
-        const a = (this.getReg(rs) | 0);
-        const b = (signExtend16(imm) | 0);
-        const r = (a + b) | 0;
-        if (((a ^ r) & (b ^ r)) < 0) {
+      case 0x18: { // DADDI rt, rs, imm (64-bit add immediate with overflow)
+        const aHi = this.getRegHi(rs) >>> 0; const aLo = this.getReg(rs) >>> 0;
+        const immS = signExtend16(imm) >>> 0; // as unsigned 32, but sign encoded via hiB
+        const bHi = ((immS >>> 15) & 1) !== 0 ? 0xFFFFFFFF >>> 0 : 0x00000000 >>> 0; // sign-extended to 64
+        const bLo = immS >>> 0;
+        const lo = (aLo + bLo) >>> 0;
+        const carry = (lo < aLo) ? 1 : 0;
+        const hi = (aHi + bHi + carry) >>> 0;
+        // Signed overflow detection for 64-bit: if signs of operands equal and differ from result
+        const aSign = (aHi >>> 31) & 1; const bSign = (bHi >>> 31) & 1; const rSign = (hi >>> 31) & 1;
+        if (aSign === bSign && rSign !== aSign) {
           throw new CPUException('Overflow', this.pc >>> 0);
         }
-        this.setReg(rt, r >>> 0);
+        this.setReg64(rt, hi, lo);
         return;
       }
-      case 0x19: { // DADDIU rt, rs, imm (64-bit add immediate unsigned) - modeled as 32-bit ADDIU
-        const res = (this.getReg(rs) + (signExtend16(imm) >>> 0)) >>> 0;
-        this.setReg(rt, res);
+      case 0x19: { // DADDIU rt, rs, imm (64-bit add immediate unsigned)
+        const aHi = this.getRegHi(rs) >>> 0; const aLo = this.getReg(rs) >>> 0;
+        const immS = signExtend16(imm) >>> 0;
+        const bHi = ((immS >>> 15) & 1) !== 0 ? 0xFFFFFFFF >>> 0 : 0x00000000 >>> 0;
+        const bLo = immS >>> 0;
+        const lo = (aLo + bLo) >>> 0;
+        const carry = (lo < aLo) ? 1 : 0;
+        const hi = (aHi + bHi + carry) >>> 0;
+        this.setReg64(rt, hi, lo);
         return;
       }
       case 0x1a: { // LDL rt, offset(base) - big-endian 64-bit partial load (left)

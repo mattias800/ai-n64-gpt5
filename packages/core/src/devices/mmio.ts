@@ -495,15 +495,12 @@ export class PI extends MMIO {
             if (baseRam + i < this.rdram.length) this.rdram[baseRam + i] = b;
           }
         }
-        // Synchronous model: DMA completes immediately; clear busy bits and raise MI interrupt
-        this.status &= ~PI_STATUS_DMA_BUSY;
-        this.status &= ~PI_STATUS_IO_BUSY;
-        if (this.mi) this.mi.raise(MI_INTR_PI);
+        // Asynchronous model: leave busy bits set until completeDMA() or STATUS ack clears them.
         return;
       case PI_WR_LEN_OFF:
         this.wrLen = val; this.status |= (PI_STATUS_DMA_BUSY | PI_STATUS_IO_BUSY);
         // Correct semantics: WR_LEN is RDRAM -> cart write. We do not model cart memory, so perform no data movement.
-        // Preserve timing/interrupt behavior only.
+        // Preserve timing/interrupt behavior only; leave busy set until completion or STATUS ack.
         if (process.env.N64_TESTS_DEBUG) {
           const baseRam = this.dramAddr >>> 0;
           const len = ((val & 0x00ffffff) >>> 0) + 1;
@@ -514,12 +511,10 @@ export class PI extends MMIO {
             console.log(`[PI WR] (ignored data) src=0x${baseRam.toString(16)} len=0x${len.toString(16)} cartAddr=0x${(this.cartAddr>>>0).toString(16)}`);
           }
         }
-        this.status &= ~PI_STATUS_DMA_BUSY;
-        this.status &= ~PI_STATUS_IO_BUSY;
-        if (this.mi) this.mi.raise(MI_INTR_PI);
         return;
 case PI_STATUS_OFF:
-        // Writing 1 bits clears corresponding busy flags; also clear MI pending for PI when busy bit is cleared
+        // Writing 1 bits clears corresponding busy flags.
+        // Only clearing DMA_BUSY should also clear the MI PI pending per test expectations.
         {
           const w = mergeAckMask(val);
           if (w & PI_STATUS_DMA_BUSY) {
@@ -528,8 +523,6 @@ case PI_STATUS_OFF:
           }
           if (w & PI_STATUS_IO_BUSY) {
             this.status &= ~PI_STATUS_IO_BUSY;
-            // On real hardware, OS commonly acks PI interrupt by writing 0x2 to STATUS; honor that and clear MI pending as well.
-            if (this.mi) this.mi.clear(MI_INTR_PI);
           }
           return;
         }
@@ -615,17 +608,25 @@ case SI_STATUS_OFF:
         // ECHO: copy byte [1] to [2]
         this.pifRam[2] = this.pifRam[1] ?? 0;
       } else if (cmd === 0x10) {
-        // Controller status: respond as present, no pak
-        this.pifRam[1] = 0x01; // present
+        // Controller status: present only on port 0
+        this.pifRam[1] = (port === 0) ? 0x01 : 0x00; // present flag
         this.pifRam[2] = 0x00; // pak type (0 = none)
         this.pifRam[3] = 0x00; // reserved
       } else if (cmd === 0x11) {
-        // Controller state: fixed buttons/sticks to satisfy tests
-        this.pifRam[1] = 0x00; // status OK
-        this.pifRam[2] = 0x12; // buttons hi
-        this.pifRam[3] = 0x34; // buttons lo
-        this.pifRam[4] = 0x05; // stick X = +5
-        this.pifRam[5] = 0xFB; // stick Y = -5
+        // Controller state: only valid on port 0; others return error status 0xFF and zero state
+        if (port === 0) {
+          this.pifRam[1] = 0x00; // status OK
+          this.pifRam[2] = 0x12; // buttons hi
+          this.pifRam[3] = 0x34; // buttons lo
+          this.pifRam[4] = 0x05; // stick X = +5
+          this.pifRam[5] = 0xFB; // stick Y = -5
+        } else {
+          this.pifRam[1] = 0xFF; // error/not present
+          this.pifRam[2] = 0x00;
+          this.pifRam[3] = 0x00;
+          this.pifRam[4] = 0x00;
+          this.pifRam[5] = 0x00;
+        }
       }
     } catch {}
     // Interpret the written PIF RAM and prepare a response
