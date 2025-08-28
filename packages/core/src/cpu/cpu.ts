@@ -747,6 +747,69 @@ export class CPU {
             this.setReg64(rd, hiN, loN);
             return;
           }
+          // Register-register trap group
+          case 0x30: { // TGE rs, rt (signed 64-bit)
+            const aHi = this.getRegHi(rs) >>> 0, aLo = this.getReg(rs) >>> 0;
+            const bHi = this.getRegHi(rt) >>> 0, bLo = this.getReg(rt) >>> 0;
+            const aHiS = (aHi | 0), bHiS = (bHi | 0);
+            let cond: boolean;
+            if (aHiS !== bHiS) cond = aHiS > bHiS; else cond = (aLo >>> 0) >= (bLo >>> 0);
+            if (cond) {
+              if (this.fastbootSkipReserved) { this.warnDecode('trap_suppressed', 'tge', { rs: rs>>>0, rt: rt>>>0 }); }
+              else { this.warnDecode('trap_taken', 'tge', { rs: rs>>>0, rt: rt>>>0 }); throw new CPUException('Trap', 0); }
+            }
+            return;
+          }
+          case 0x31: { // TGEU rs, rt (unsigned 64-bit)
+            const aHi = this.getRegHi(rs) >>> 0, aLo = this.getReg(rs) >>> 0;
+            const bHi = this.getRegHi(rt) >>> 0, bLo = this.getReg(rt) >>> 0;
+            let cond: boolean;
+            if (aHi !== bHi) cond = (aHi >>> 0) > (bHi >>> 0); else cond = (aLo >>> 0) >= (bLo >>> 0);
+            if (cond) {
+              if (this.fastbootSkipReserved) { this.warnDecode('trap_suppressed', 'tgeu', { rs: rs>>>0, rt: rt>>>0 }); }
+              else { this.warnDecode('trap_taken', 'tgeu', { rs: rs>>>0, rt: rt>>>0 }); throw new CPUException('Trap', 0); }
+            }
+            return;
+          }
+          case 0x32: { // TLT rs, rt (signed 64-bit)
+            const aHi = this.getRegHi(rs) >>> 0, aLo = this.getReg(rs) >>> 0;
+            const bHi = this.getRegHi(rt) >>> 0, bLo = this.getReg(rt) >>> 0;
+            const aHiS = (aHi | 0), bHiS = (bHi | 0);
+            let isLt: boolean;
+            if (aHiS !== bHiS) isLt = aHiS < bHiS; else isLt = (aLo >>> 0) < (bLo >>> 0);
+            if (isLt) {
+              if (this.fastbootSkipReserved) { this.warnDecode('trap_suppressed', 'tlt', { rs: rs>>>0, rt: rt>>>0 }); }
+              else { this.warnDecode('trap_taken', 'tlt', { rs: rs>>>0, rt: rt>>>0 }); throw new CPUException('Trap', 0); }
+            }
+            return;
+          }
+          case 0x33: { // TLTU rs, rt (unsigned 64-bit)
+            const aHi = this.getRegHi(rs) >>> 0, aLo = this.getReg(rs) >>> 0;
+            const bHi = this.getRegHi(rt) >>> 0, bLo = this.getReg(rt) >>> 0;
+            let isLt: boolean;
+            if (aHi !== bHi) isLt = (aHi >>> 0) < (bHi >>> 0); else isLt = (aLo >>> 0) < (bLo >>> 0);
+            if (isLt) {
+              if (this.fastbootSkipReserved) { this.warnDecode('trap_suppressed', 'tltu', { rs: rs>>>0, rt: rt>>>0 }); }
+              else { this.warnDecode('trap_taken', 'tltu', { rs: rs>>>0, rt: rt>>>0 }); throw new CPUException('Trap', 0); }
+            }
+            return;
+          }
+          case 0x34: { // TEQ rs, rt (64-bit equality)
+            const eq = (this.getReg(rs) === this.getReg(rt)) && (this.getRegHi(rs) === this.getRegHi(rt));
+            if (eq) {
+              if (this.fastbootSkipReserved) { this.warnDecode('trap_suppressed', 'teq', { rs: rs>>>0, rt: rt>>>0 }); }
+              else { this.warnDecode('trap_taken', 'teq', { rs: rs>>>0, rt: rt>>>0 }); throw new CPUException('Trap', 0); }
+            }
+            return;
+          }
+          case 0x36: { // TNE rs, rt (64-bit inequality)
+            const ne = (this.getReg(rs) !== this.getReg(rt)) || (this.getRegHi(rs) !== this.getRegHi(rt));
+            if (ne) {
+              if (this.fastbootSkipReserved) { this.warnDecode('trap_suppressed', 'tne', { rs: rs>>>0, rt: rt>>>0 }); }
+              else { this.warnDecode('trap_taken', 'tne', { rs: rs>>>0, rt: rt>>>0 }); throw new CPUException('Trap', 0); }
+            }
+            return;
+          }
           default:
             // Unknown SPECIAL funct
             this.warnDecode('special_reserved', `special_funct_0x${funct.toString(16)}`, { funct: funct >>> 0 });
