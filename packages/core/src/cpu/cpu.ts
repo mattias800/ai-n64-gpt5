@@ -377,6 +377,12 @@ export class CPU {
       const asid = (this.cop0.read(10) >>> 0) & 0xff;
       const vpn2 = (badVAddr >>> 13) >>> 0;
       this.cop0.write(10, (((vpn2 << 13) >>> 0) | asid) >>> 0);
+      // Also update Context.BadVPN2 (bits [31:23]) while preserving PTEBase [22:4]
+      const ctxOld = this.cop0.read(4) >>> 0; // Context
+      const pteBaseMask = 0x007FFFF0 >>> 0; // bits [22:4]
+      const badVpn2High9 = ((badVAddr >>> 23) & 0x1ff) >>> 0; // VA[31:23]
+      const ctxNew = (((ctxOld & pteBaseMask) | (badVpn2High9 << 23)) >>> 0);
+      this.cop0.write(4, ctxNew >>> 0);
     }
     this.cop0.setException(code, faultingPC >>> 0, badVAddr, inDelaySlot);
     // Vector selection:
