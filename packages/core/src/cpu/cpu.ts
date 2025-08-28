@@ -265,7 +265,15 @@ export class CPU {
     return (this.getReg(baseReg) + (signExtend16(imm) >>> 0)) >>> 0;
   }
 
-  // Address translation using KSEG rules and TLB for KUSEG (4KB pages only for now)
+  // Count contiguous 1s in PageMask starting at bit 13 (determines page size 4KB << n)
+  private pageMaskSpanBits(mask: number): number {
+    let m = (mask >>> 13) >>> 0;
+    let n = 0;
+    while ((m & 1) !== 0 && n < 13) { n++; m >>>= 1; }
+    return n;
+  }
+
+  // Address translation using KSEG rules and TLB with PageMask support
   private translateAddress(vaddr: number, acc: 'r'|'w'|'x'): number {
     const va = vaddr >>> 0;
     const region = va >>> 28;
@@ -273,17 +281,22 @@ export class CPU {
     if (region < 0x8) {
       if (this.identityMapKuseg) return va >>> 0;
       const asid = (this.cop0.read(10) >>> 0) & 0xff;
-      const vpn2 = (va >>> 13) >>> 0;
       for (let i = 0; i < CPU.TLB_SIZE; i++) {
         const e = this.tlb[i]!;
-        if (e.vpn2 === vpn2 && (e.g || e.asid === asid)) {
-          const odd = ((va >>> 12) & 1) !== 0;
+        if (!(e.g || e.asid === asid)) continue;
+        const xorTag = ((va ^ ((e.vpn2 << 13) >>> 0)) >>> 0);
+        const tagMask = (~((e.mask | 0x1FFF) >>> 0)) >>> 0;
+        if ((xorTag & tagMask) === 0) {
+          const n = this.pageMaskSpanBits(e.mask >>> 0);
+          const evenOddBit = (12 + n) | 0;
+          const odd = (((va >>> evenOddBit) & 1) !== 0);
           const v = odd ? e.v1 : e.v0;
           const d = odd ? e.d1 : e.d0;
           if (!v) break;
           if (acc === 'w' && !d) throw new CPUException('TLBStore', va >>> 0);
           const pfn = odd ? e.pfn1 : e.pfn0;
-          const paddr = (((pfn << 12) >>> 0) | (va & 0xFFF)) >>> 0;
+          const offsetMask = (((1 << (12 + n)) >>> 0) - 1) >>> 0;
+          const paddr = ((((pfn << 12) >>> 0) | (va & offsetMask)) >>> 0);
           return paddr >>> 0;
         }
       }
@@ -292,19 +305,24 @@ export class CPU {
     }
     if (region === 0x8 || region === 0x9) return (va - 0x8000_0000) >>> 0; // KSEG0 cached
     if (region === 0xA || region === 0xB) return (va - 0xA000_0000) >>> 0; // KSEG1 uncached
-    // Other regions via TLB (support 4KB pages; ignore PageMask for now)
+    // Other segments via TLB (with PageMask support)
     const asid = (this.cop0.read(10) >>> 0) & 0xff; // EntryHi ASID
-    const vpn2 = (va >>> 13) >>> 0;
     for (let i = 0; i < CPU.TLB_SIZE; i++) {
       const e = this.tlb[i]!;
-      if (e.vpn2 === vpn2 && (e.g || e.asid === asid)) {
-        const odd = ((va >>> 12) & 1) !== 0;
+      if (!(e.g || e.asid === asid)) continue;
+      const xorTag = ((va ^ ((e.vpn2 << 13) >>> 0)) >>> 0);
+      const tagMask = (~((e.mask | 0x1FFF) >>> 0)) >>> 0;
+      if ((xorTag & tagMask) === 0) {
+        const n = this.pageMaskSpanBits(e.mask >>> 0);
+        const evenOddBit = (12 + n) | 0;
+        const odd = (((va >>> evenOddBit) & 1) !== 0);
         const v = odd ? e.v1 : e.v0;
         const d = odd ? e.d1 : e.d0;
         if (!v) break;
         if (acc === 'w' && !d) throw new CPUException('TLBStore', va >>> 0);
         const pfn = odd ? e.pfn1 : e.pfn0;
-        const paddr = (((pfn << 12) >>> 0) | (va & 0xFFF)) >>> 0;
+        const offsetMask = (((1 << (12 + n)) >>> 0) - 1) >>> 0;
+        const paddr = ((((pfn << 12) >>> 0) | (va & offsetMask)) >>> 0);
         return paddr >>> 0;
       }
     }
@@ -1284,11 +1302,15 @@ export class CPU {
               }
               case 0x08: { // TLBP - probe, set Index to match or high bit if not found
                 const hi = this.cop0.read(10) >>> 0;
-                const asid = hi & 0xff; const vpn2 = (hi >>> 13) >>> 0;
+                const asid = hi & 0xff;
+                const probeVA = (((hi >>> 13) << 13) >>> 0);
                 let found = -1;
                 for (let i = 0; i < CPU.TLB_SIZE; i++) {
                   const e = this.tlb[i]!;
-                  if (e.vpn2 === vpn2 && (e.g || e.asid === asid)) { found = i; break; }
+                  if (!(e.g || e.asid === asid)) continue;
+                  const xorTag = ((probeVA ^ ((e.vpn2 << 13) >>> 0)) >>> 0);
+                  const tagMask = (~((e.mask | 0x1FFF) >>> 0)) >>> 0;
+                  if ((xorTag & tagMask) === 0) { found = i; break; }
                 }
                 if (found >= 0) this.cop0.write(0, found >>> 0);
                 else this.cop0.write(0, (1 << 31) >>> 0);
