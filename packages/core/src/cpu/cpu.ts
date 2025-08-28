@@ -36,6 +36,7 @@ export class CPU {
     asid: number; // 8-bit
     g: boolean;
     pfn0: number; pfn1: number; // frame numbers >> 12
+    c0: number; c1: number; // coherency attributes
     v0: boolean; d0: boolean; v1: boolean; d1: boolean;
   }>; 
   private tlbRandom = 31 >>> 0; // start at max index
@@ -66,7 +67,7 @@ export class CPU {
     // Initialize empty TLB entries
     this.tlb = new Array(CPU.TLB_SIZE);
     for (let i = 0; i < CPU.TLB_SIZE; i++) {
-      this.tlb[i] = { mask: 0, vpn2: 0, asid: 0, g: false, pfn0: 0, pfn1: 0, v0: false, d0: false, v1: false, d1: false };
+      this.tlb[i] = { mask: 0, vpn2: 0, asid: 0, g: false, pfn0: 0, pfn1: 0, c0: 0, c1: 0, v0: false, d0: false, v1: false, d1: false };
     }
     this.identityMapKuseg = opts?.identityMapKuseg ?? true;
     this.reset();
@@ -335,8 +336,9 @@ export class CPU {
         return paddr >>> 0;
       }
     }
-    // Fallback: return VA as physical (acts like unmapped cached)
-    return va >>> 0;
+    // Fallback on miss: raise TLB* for mapped segments
+    if (acc === 'w') throw new CPUException('TLBStore', va >>> 0);
+    else throw new CPUException('TLBLoad', va >>> 0);
   }
 
   private loadU8TLB(addr: number, exec = false): number { return this.bus.loadU8Phys(this.translateAddress(addr, exec ? 'x' : 'r')); }
@@ -1386,9 +1388,9 @@ export class CPU {
                 // Assemble EntryHi, EntryLo0/1, PageMask
                 const entryHi = (((e.vpn2 << 13) >>> 0) | (e.asid & 0xff)) >>> 0;
                 this.cop0.write(10, entryHi);
-                const loBits = (pfn: number, v: boolean, d: boolean, g: boolean) => (((pfn & 0xFFFFF) << 6) | ((0 /*C*/ & 0x7) << 3) | ((d?1:0) << 2) | ((v?1:0) << 1) | (g?1:0)) >>> 0;
-                this.cop0.write(2, loBits(e.pfn0, e.v0, e.d0, e.g));
-                this.cop0.write(3, loBits(e.pfn1, e.v1, e.d1, e.g));
+                const loBits = (pfn: number, v: boolean, d: boolean, g: boolean, c: number) => (((pfn & 0xFFFFF) << 6) | ((c & 0x7) << 3) | ((d?1:0) << 2) | ((v?1:0) << 1) | (g?1:0)) >>> 0;
+                this.cop0.write(2, loBits(e.pfn0, e.v0, e.d0, e.g, e.c0));
+                this.cop0.write(3, loBits(e.pfn1, e.v1, e.d1, e.g, e.c1));
                 this.cop0.write(5, e.mask >>> 0);
                 return;
               }
@@ -1596,7 +1598,7 @@ export class CPU {
     const asid = entryHi & 0xff;
     const decodeLo = (lo: number) => {
       const pfn = (lo >>> 6) & 0xFFFFF;
-      const c = (lo >>> 3) & 0x7; // unused
+      const c = (lo >>> 3) & 0x7;
       const d = ((lo >>> 2) & 1) !== 0;
       const v = ((lo >>> 1) & 1) !== 0;
       const g = (lo & 1) !== 0;
@@ -1607,7 +1609,7 @@ export class CPU {
     const g = a0.g && a1.g;
     const e = this.tlb[idx]!;
     e.mask = mask >>> 0; e.vpn2 = vpn2 >>> 0; e.asid = asid >>> 0; e.g = g;
-    e.pfn0 = a0.pfn >>> 0; e.pfn1 = a1.pfn >>> 0; e.v0 = a0.v; e.d0 = a0.d; e.v1 = a1.v; e.d1 = a1.d;
+    e.pfn0 = a0.pfn >>> 0; e.pfn1 = a1.pfn >>> 0; e.c0 = a0.c >>> 0; e.c1 = a1.c >>> 0; e.v0 = a0.v; e.d0 = a0.d; e.v1 = a1.v; e.d1 = a1.d;
   }
 }
 
