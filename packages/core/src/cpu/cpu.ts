@@ -5,6 +5,8 @@ import { Cop0 } from './cop0.js';
 
 type CPUOptions = {
   identityMapKuseg?: boolean;
+  // Increment CP0 Count every N CPU steps (default 1 = each step)
+  countDivisor?: number;
 };
 
 export class CPU {
@@ -54,6 +56,10 @@ export class CPU {
   // Detect spinning in empty exception vector (fastboot-HLE aid)
   private vectorNopCount = 0;
 
+  // Timer rate control
+  private cycleCounter = 0;
+  private readonly countDivisor: number = 1;
+
   // Optional single-step trace callback
   onTrace?: (pc: number, instr: number) => void;
 
@@ -70,6 +76,7 @@ export class CPU {
       this.tlb[i] = { mask: 0, vpn2: 0, asid: 0, g: false, pfn0: 0, pfn1: 0, c0: 0, c1: 0, v0: false, d0: false, v1: false, d1: false };
     }
     this.identityMapKuseg = opts?.identityMapKuseg ?? true;
+    this.countDivisor = Math.max(1, Math.floor(opts?.countDivisor ?? 1));
     this.reset();
   }
 
@@ -117,8 +124,11 @@ export class CPU {
   }
 
   step(): void {
-    // Advance CP0 timer
-    this.cop0.tick();
+    // Advance CP0 timer at configured rate
+    this.cycleCounter = (this.cycleCounter + 1) | 0;
+    if (this.cycleCounter % this.countDivisor === 0) {
+      this.cop0.tick();
+    }
     // Advance Random register domain (simple decrement within TLB range)
     const wired = (this.cop0.read(6) >>> 0) & 0x3f; // Wired
     const max = CPU.TLB_SIZE - 1;
