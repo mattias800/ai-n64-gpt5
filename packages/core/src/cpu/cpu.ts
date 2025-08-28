@@ -365,6 +365,7 @@ export class CPU {
       ReservedInstruction: 10,
       Syscall: 8,
       Overflow: 12,
+      CoprocessorUnusable: 11,
       Trap: 13,
     };
     const code = excMap[ex.code] ?? 0;
@@ -1273,6 +1274,11 @@ export class CPU {
         return;
       }
       case 0x11: { // COP1
+        // Gate COP1 usage by Status.CU1; if disabled, raise Coprocessor Unusable
+        const status0 = this.cop0.read(12) >>> 0;
+        if ((status0 & Cop0.STATUS_CU1) === 0) {
+          throw new CPUException('CoprocessorUnusable', 0);
+        }
         const rsField = rs; // per MIPS enc, this is fmt/control selector
         // Control transfers and branch-on-c1 implement minimal semantics; arithmetic is NOP
         switch (rsField) {
@@ -1339,6 +1345,13 @@ export class CPU {
         }
       }
       case 0x10: { // COP0
+        // In user mode (KSU==2) and not already in EXL, COP0 ops are privileged
+        const status0 = this.cop0.read(12) >>> 0;
+        const exl0 = (status0 & Cop0.STATUS_EXL) !== 0;
+        const ksu0 = (status0 >>> 3) & 0x3;
+        if (!exl0 && ksu0 === 2) {
+          throw new CPUException('ReservedInstruction', 0);
+        }
         const rsField = rs;
         const rdField = rd;
         switch (rsField) {

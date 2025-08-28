@@ -10,6 +10,10 @@ export class Cop0 {
   static readonly STATUS_EXL = 1 << 1; // Exception Level
   static readonly STATUS_BEV = 1 << 22; // Bootstrap Exception Vectors
   static readonly STATUS_IM_MASK = 0xff << 8; // Interrupt mask bits [15:8]
+  static readonly STATUS_CU0 = 1 << 28; // Coprocessor 0 usable (architectural)
+  static readonly STATUS_CU1 = 1 << 29; // Coprocessor 1 usable
+  static readonly STATUS_CU2 = 1 << 30;
+  static readonly STATUS_CU3 = 1 << 31;
 
   // Cause register fields
   static readonly CAUSE_BD = 1 << 31; // Branch Delay
@@ -39,8 +43,8 @@ export class Cop0 {
     const v = value >>> 0;
     switch (reg) {
       case 12: { // Status
-        // Allow writes to IE, EXL, KSU[4:3], IM[15:8], BEV; preserve others
-        const allowed = (1 << 0) | (1 << 1) | (3 << 3) | (0xff << 8) | (1 << 22);
+        // Allow writes to IE, EXL, KSU[4:3], IM[15:8], BEV, CU[31:28]; preserve others
+        const allowed = (1 << 0) | (1 << 1) | (3 << 3) | (0xff << 8) | (1 << 22) | (0xF << 28);
         const cur = (this.regs[12] ?? 0) >>> 0;
         this.regs[12] = ((cur & ~allowed) | (v & allowed)) >>> 0;
         break;
