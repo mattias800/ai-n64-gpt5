@@ -64,5 +64,89 @@ describe('CP0/KSU privilege and COP1 CU1 gating', () => {
     const pcVec = cpu.pc >>> 0;
     expect(pcVec).toBe((0x80000000 + 0x180) >>> 0);
   });
-});
 
+  it('Enabling CU1 via Status allows COP1 MFC1 without exception', () => {
+    const rdram = new RDRAM(64 * 1024);
+    const bus = new Bus(rdram);
+    const cpu = new CPU(bus);
+
+    // Enable CU1 and clear BEV; leave KSU=Kernel
+    let status = cpu.cop0.read(12) >>> 0;
+    status &= ~((1<<22)); // BEV=0
+    status |= (1<<29); // CU1=1
+    cpu.cop0.write(12, status >>> 0);
+
+    const prog = [
+      MFC1(2, 0), // should not raise now
+    ];
+    writeProgram(bus.rdram, prog, 0);
+    cpu.pc = 0x00000000 >>> 0;
+
+    cpu.step();
+
+    // No exception => PC advanced to 0x4
+    expect(cpu.pc >>> 0).toBe(0x00000004 >>> 0);
+  });
+
+  it('EXL=1 with KSU=User permits COP0 ops (no ReservedInstruction)', () => {
+    const rdram = new RDRAM(64 * 1024);
+    const bus = new Bus(rdram);
+    const cpu = new CPU(bus);
+
+    // Set KSU=User(2), set EXL=1, BEV=0
+    let status = cpu.cop0.read(12) >>> 0;
+    status &= ~((1<<22) | (3<<3)); // BEV=0, clear KSU
+    status |= (2 << 3); // KSU=2 (User)
+    status |= (1 << 1); // EXL=1
+    cpu.cop0.write(12, status >>> 0);
+
+    const prog = [
+      MTC0(0, 9), // write Count=0; should be allowed in EXL even if KSU=User
+    ];
+    writeProgram(bus.rdram, prog, 0);
+    cpu.pc = 0x00000000 >>> 0;
+
+    cpu.step();
+
+    // No exception => PC advanced to 0x4 (not vectored)
+    expect(cpu.pc >>> 0).toBe(0x00000004 >>> 0);
+  });
+
+  it('Supervisor mode (KSU=1) permits COP0 ops when not in EXL', () => {
+    const rdram = new RDRAM(64 * 1024);
+    const bus = new Bus(rdram);
+    const cpu = new CPU(bus);
+
+    // Set KSU=Supervisor(1), clear EXL, BEV=0
+    let status = cpu.cop0.read(12) >>> 0;
+    status &= ~((1<<22) | (3<<3) | (1<<1));
+    status |= (1 << 3);
+    cpu.cop0.write(12, status >>> 0);
+
+    const prog = [
+      MTC0(0, 9), // write Count=0; should be allowed
+    ];
+    writeProgram(bus.rdram, prog, 0);
+    cpu.pc = 0x00000000 >>> 0;
+
+    cpu.step();
+    expect(cpu.pc >>> 0).toBe(0x00000004 >>> 0);
+  });
+
+  it('Status CU[3:0] bits can be written and read back', () => {
+    const rdram = new RDRAM(64 * 1024);
+    const bus = new Bus(rdram);
+    const cpu = new CPU(bus);
+
+    const cuMask = ((1<<28) | (1<<29) | (1<<30) | (1<<31)) >>> 0;
+    // Set all CU bits
+    let s = cpu.cop0.read(12) >>> 0;
+    cpu.cop0.write(12, (s | cuMask) >>> 0);
+    const s1 = cpu.cop0.read(12) >>> 0;
+    expect((s1 & cuMask) >>> 0).toBe(cuMask >>> 0);
+    // Clear all CU bits
+    cpu.cop0.write(12, (s1 & ~cuMask) >>> 0);
+    const s2 = cpu.cop0.read(12) >>> 0;
+    expect((s2 & cuMask) >>> 0).toBe(0);
+  });
+});
