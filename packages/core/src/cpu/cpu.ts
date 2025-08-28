@@ -383,6 +383,10 @@ export class CPU {
       const badVpn2High9 = ((badVAddr >>> 23) & 0x1ff) >>> 0; // VA[31:23]
       const ctxNew = (((ctxOld & pteBaseMask) | (badVpn2High9 << 23)) >>> 0);
       this.cop0.write(4, ctxNew >>> 0);
+      // Update XContext similarly (reg 20) for completeness in our 32-bit model
+      const xctxOld = this.cop0.read(20) >>> 0;
+      const xctxNew = (((xctxOld & pteBaseMask) | (badVpn2High9 << 23)) >>> 0);
+      this.cop0.write(20, xctxNew >>> 0);
     }
     this.cop0.setException(code, faultingPC >>> 0, badVAddr, inDelaySlot);
     // Vector selection:
