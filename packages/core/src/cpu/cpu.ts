@@ -172,7 +172,7 @@ export class CPU {
       } catch (e) {
         if (e instanceof CPUException) {
           const ec = e.code;
-          const needBadV = (ec === 'AddressErrorLoad' || ec === 'AddressErrorStore' || ec === 'TLBLoad' || ec === 'TLBStore');
+          const needBadV = (ec === 'AddressErrorLoad' || ec === 'AddressErrorStore' || ec === 'TLBLoad' || ec === 'TLBStore' || ec === 'TLBModified');
           this.enterException(e, branchInstrPC, needBadV ? (e.badVAddr >>> 0) : null, true);
           this.inDelaySlot = false;
           this.branchPending = false;
@@ -252,7 +252,7 @@ export class CPU {
     } catch (e) {
       if (e instanceof CPUException) {
         const ec = e.code;
-        const needBadV = (ec === 'AddressErrorLoad' || ec === 'AddressErrorStore' || ec === 'TLBLoad' || ec === 'TLBStore');
+        const needBadV = (ec === 'AddressErrorLoad' || ec === 'AddressErrorStore' || ec === 'TLBLoad' || ec === 'TLBStore' || ec === 'TLBModified');
         this.enterException(e, instrPC, needBadV ? (e.badVAddr >>> 0) : null, false);
       } else {
         throw e;
@@ -302,7 +302,7 @@ export class CPU {
           const v = odd ? e.v1 : e.v0;
           const d = odd ? e.d1 : e.d0;
           if (!v) break;
-          if (acc === 'w' && !d) throw new CPUException('TLBStore', va >>> 0);
+          if (acc === 'w' && !d) throw new CPUException('TLBModified', va >>> 0);
           const pfn = odd ? e.pfn1 : e.pfn0;
           const offsetMask = (((1 << (12 + n)) >>> 0) - 1) >>> 0;
           const paddr = ((((pfn << 12) >>> 0) | (va & offsetMask)) >>> 0);
@@ -328,7 +328,7 @@ export class CPU {
         const v = odd ? e.v1 : e.v0;
         const d = odd ? e.d1 : e.d0;
         if (!v) break;
-        if (acc === 'w' && !d) throw new CPUException('TLBStore', va >>> 0);
+        if (acc === 'w' && !d) throw new CPUException('TLBModified', va >>> 0);
         const pfn = odd ? e.pfn1 : e.pfn0;
         const offsetMask = (((1 << (12 + n)) >>> 0) - 1) >>> 0;
         const paddr = ((((pfn << 12) >>> 0) | (va & offsetMask)) >>> 0);
@@ -356,6 +356,7 @@ export class CPU {
     const excMap: Record<string, number> = {
       // MIPS R4300 exception codes (Cause.ExcCode)
       Interrupt: 0,
+      TLBModified: 1, // Mod (store to clean page)
       TLBLoad: 2, // TLBL (load/fetch)
       TLBStore: 3, // TLBS (store)
       AddressErrorLoad: 4, // ADEL
@@ -372,7 +373,7 @@ export class CPU {
     const bev = (statusBefore >>> 22) & 1;
     const exlPrev = (statusBefore & Cop0.STATUS_EXL) !== 0;
     // For TLB exceptions, update EntryHi with faulting VPN2 | current ASID to aid OS refill handlers
-    if ((ex.code === 'TLBLoad' || ex.code === 'TLBStore') && badVAddr !== null) {
+    if ((ex.code === 'TLBLoad' || ex.code === 'TLBStore' || ex.code === 'TLBModified') && badVAddr !== null) {
       const asid = (this.cop0.read(10) >>> 0) & 0xff;
       const vpn2 = (badVAddr >>> 13) >>> 0;
       this.cop0.write(10, (((vpn2 << 13) >>> 0) | asid) >>> 0);

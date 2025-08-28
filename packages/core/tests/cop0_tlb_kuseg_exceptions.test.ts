@@ -97,7 +97,7 @@ describe('COP0 TLB exceptions with KUSEG when identityMapKuseg=false', () => {
     expect(cpu.pc >>> 0).toBe(0x80000000 >>> 0); // refill base
   });
 
-  it('TLBS on SW to a mapped but non-dirty odd page (D=0)', () => {
+  it('TLB Modified (Mod) on SW to a mapped but non-dirty odd page (D=0)', () => {
     const rdram = new RDRAM(64 * 1024);
     const bus = new Bus(rdram);
     const cpu = new CPU(bus, { identityMapKuseg: false });
@@ -121,7 +121,7 @@ describe('COP0 TLB exceptions with KUSEG when identityMapKuseg=false', () => {
       // r3 = 0x00001000 (odd page), r4 = 0xABCD1234
       LUI(3, 0x0000), ORI(3, 3, 0x1000),
       LUI(4, 0xABCD), ORI(4, 4, 0x1234),
-      // SW r4, 0(r3) -> should raise TLBS (D=0)
+      // SW r4, 0(r3) -> should raise TLB Modified (D=0)
       SW(4, 3, 0),
       NOP
     ];
@@ -139,15 +139,16 @@ describe('COP0 TLB exceptions with KUSEG when identityMapKuseg=false', () => {
     expect(!!tlb0.d1).toBe(false);
 
     const swPC = cpu.pc >>> 0;
-    cpu.step(); // TLBS
+    cpu.step(); // Mod
 
     const cause = cpu.cop0.read(13) >>> 0;
     const epc = cpu.cop0.read(14) >>> 0;
     const badv = cpu.cop0.read(8) >>> 0;
-    expect(((cause >>> 2) & 0x1f) >>> 0).toBe(3);
+    expect(((cause >>> 2) & 0x1f) >>> 0).toBe(1);
     expect(epc >>> 0).toBe(swPC >>> 0);
     expect(badv >>> 0).toBe(0x00001000 >>> 0);
-    expect(cpu.pc >>> 0).toBe(0x80000000 >>> 0);
+    // Mod uses the general exception vector (not refill): base + 0x180
+    expect(cpu.pc >>> 0).toBe(0x80000180 >>> 0);
   });
 
   it('TLBP finds the entry; TLBR reads it back into CP0 regs', () => {
