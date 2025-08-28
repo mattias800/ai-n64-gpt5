@@ -3,6 +3,10 @@ import { Bus } from '../mem/bus.js';
 import { CPUException } from './exceptions.js';
 import { Cop0 } from './cop0.js';
 
+type CPUOptions = {
+  identityMapKuseg?: boolean;
+};
+
 export class CPU {
   readonly regs = new Uint32Array(32); // low 32 bits of GPRs
   readonly regsHi = new Uint32Array(32); // high 32 bits of GPRs (for 64-bit ops)
@@ -56,13 +60,15 @@ export class CPU {
   private lastInstrPC = 0 >>> 0;
   private lastInstrWord = 0 >>> 0;
   private decodeWarnedKeys = new Set<string>();
+  private readonly identityMapKuseg: boolean;
 
-  constructor(public readonly bus: Bus) {
+  constructor(public readonly bus: Bus, opts?: CPUOptions) {
     // Initialize empty TLB entries
     this.tlb = new Array(CPU.TLB_SIZE);
     for (let i = 0; i < CPU.TLB_SIZE; i++) {
       this.tlb[i] = { mask: 0, vpn2: 0, asid: 0, g: false, pfn0: 0, pfn1: 0, v0: false, d0: false, v1: false, d1: false };
     }
+    this.identityMapKuseg = opts?.identityMapKuseg ?? true;
     this.reset();
   }
 
@@ -165,7 +171,9 @@ export class CPU {
         this.execute(delayInstr);
       } catch (e) {
         if (e instanceof CPUException) {
-          this.enterException(e, branchInstrPC, e.code.startsWith('AddressError') ? e.badVAddr : null, true);
+          const ec = e.code;
+          const needBadV = (ec === 'AddressErrorLoad' || ec === 'AddressErrorStore' || ec === 'TLBLoad' || ec === 'TLBStore');
+          this.enterException(e, branchInstrPC, needBadV ? (e.badVAddr >>> 0) : null, true);
           this.inDelaySlot = false;
           this.branchPending = false;
           this.regs[0] = 0;
@@ -243,7 +251,9 @@ export class CPU {
       this.execute(instr);
     } catch (e) {
       if (e instanceof CPUException) {
-        this.enterException(e, instrPC, e.code.startsWith('AddressError') ? e.badVAddr : null, false);
+        const ec = e.code;
+        const needBadV = (ec === 'AddressErrorLoad' || ec === 'AddressErrorStore' || ec === 'TLBLoad' || ec === 'TLBStore');
+        this.enterException(e, instrPC, needBadV ? (e.badVAddr >>> 0) : null, false);
       } else {
         throw e;
       }
@@ -259,9 +269,27 @@ export class CPU {
   private translateAddress(vaddr: number, acc: 'r'|'w'|'x'): number {
     const va = vaddr >>> 0;
     const region = va >>> 28;
-    // For unit tests and most core scenarios, identity-map KUSEG (0x00000000-0x7fffffff)
-    // so simple programs can execute without a configured TLB.
-    if (region < 0x8) return va >>> 0;
+    // KUSEG (0x00000000-0x7fffffff): optional identity map for tests; otherwise use TLB
+    if (region < 0x8) {
+      if (this.identityMapKuseg) return va >>> 0;
+      const asid = (this.cop0.read(10) >>> 0) & 0xff;
+      const vpn2 = (va >>> 13) >>> 0;
+      for (let i = 0; i < CPU.TLB_SIZE; i++) {
+        const e = this.tlb[i]!;
+        if (e.vpn2 === vpn2 && (e.g || e.asid === asid)) {
+          const odd = ((va >>> 12) & 1) !== 0;
+          const v = odd ? e.v1 : e.v0;
+          const d = odd ? e.d1 : e.d0;
+          if (!v) break;
+          if (acc === 'w' && !d) throw new CPUException('TLBStore', va >>> 0);
+          const pfn = odd ? e.pfn1 : e.pfn0;
+          const paddr = (((pfn << 12) >>> 0) | (va & 0xFFF)) >>> 0;
+          return paddr >>> 0;
+        }
+      }
+      if (acc === 'w') throw new CPUException('TLBStore', va >>> 0);
+      else throw new CPUException('TLBLoad', va >>> 0);
+    }
     if (region === 0x8 || region === 0x9) return (va - 0x8000_0000) >>> 0; // KSEG0 cached
     if (region === 0xA || region === 0xB) return (va - 0xA000_0000) >>> 0; // KSEG1 uncached
     // Other regions via TLB (support 4KB pages; ignore PageMask for now)
@@ -274,6 +302,7 @@ export class CPU {
         const v = odd ? e.v1 : e.v0;
         const d = odd ? e.d1 : e.d0;
         if (!v) break;
+        if (acc === 'w' && !d) throw new CPUException('TLBStore', va >>> 0);
         const pfn = odd ? e.pfn1 : e.pfn0;
         const paddr = (((pfn << 12) >>> 0) | (va & 0xFFF)) >>> 0;
         return paddr >>> 0;
@@ -311,16 +340,17 @@ export class CPU {
       Trap: 13,
     };
     const code = excMap[ex.code] ?? 0;
+    // Capture status before setting EXL to decide vectoring
+    const statusBefore = this.cop0.read(12) >>> 0;
+    const bev = (statusBefore >>> 22) & 1;
+    const exlPrev = (statusBefore & Cop0.STATUS_EXL) !== 0;
     this.cop0.setException(code, faultingPC >>> 0, badVAddr, inDelaySlot);
     // Vector selection:
     // - For TLB Refill (TLBL/TLBS) when not already in EXL, use base + 0x0000
     // - Otherwise, use general exception vector base + 0x0180
-    const status = this.cop0.read(12) >>> 0;
-    const bev = (status >>> 22) & 1;
-    const exl = (status & Cop0.STATUS_EXL) !== 0;
     const isTLBRefill = (ex.code === 'TLBLoad' || ex.code === 'TLBStore');
     const base = bev ? 0xBFC00000 >>> 0 : 0x80000000 >>> 0;
-    this.pc = (isTLBRefill && !exl) ? base : ((base + 0x180) >>> 0);
+    this.pc = (isTLBRefill && !exlPrev) ? base : ((base + 0x180) >>> 0);
   }
 
   private enterInterrupt(epc: number, inDelaySlot: boolean): void {
