@@ -277,6 +277,15 @@ export class CPU {
   private translateAddress(vaddr: number, acc: 'r'|'w'|'x'): number {
     const va = vaddr >>> 0;
     const region = va >>> 28;
+    // Enforce user-mode restrictions: when in User (KSU==2) and not already in EXL, KSEG* (region >= 8) is inaccessible
+    const status = this.cop0.read(12) >>> 0;
+    const exl = (status & Cop0.STATUS_EXL) !== 0;
+    const ksu = (status >>> 3) & 0x3; // 0=Kern,1=Sup,2=User
+    const isUser = (ksu === 2) && !exl;
+    if (isUser && region >= 0x8) {
+      if (acc === 'w') throw new CPUException('AddressErrorStore', va >>> 0);
+      else throw new CPUException('AddressErrorLoad', va >>> 0);
+    }
     // KUSEG (0x00000000-0x7fffffff): optional identity map for tests; otherwise use TLB
     if (region < 0x8) {
       if (this.identityMapKuseg) return va >>> 0;
@@ -362,6 +371,12 @@ export class CPU {
     const statusBefore = this.cop0.read(12) >>> 0;
     const bev = (statusBefore >>> 22) & 1;
     const exlPrev = (statusBefore & Cop0.STATUS_EXL) !== 0;
+    // For TLB exceptions, update EntryHi with faulting VPN2 | current ASID to aid OS refill handlers
+    if ((ex.code === 'TLBLoad' || ex.code === 'TLBStore') && badVAddr !== null) {
+      const asid = (this.cop0.read(10) >>> 0) & 0xff;
+      const vpn2 = (badVAddr >>> 13) >>> 0;
+      this.cop0.write(10, (((vpn2 << 13) >>> 0) | asid) >>> 0);
+    }
     this.cop0.setException(code, faultingPC >>> 0, badVAddr, inDelaySlot);
     // Vector selection:
     // - For TLB Refill (TLBL/TLBS) when not already in EXL, use base + 0x0000

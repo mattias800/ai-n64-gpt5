@@ -39,8 +39,8 @@ export class Cop0 {
     const v = value >>> 0;
     switch (reg) {
       case 12: { // Status
-        // Only allow writes to IE, EXL, IM[15:8], BEV; preserve others
-        const allowed = (1 << 0) | (1 << 1) | (0xff << 8) | (1 << 22);
+        // Allow writes to IE, EXL, KSU[4:3], IM[15:8], BEV; preserve others
+        const allowed = (1 << 0) | (1 << 1) | (3 << 3) | (0xff << 8) | (1 << 22);
         const cur = (this.regs[12] ?? 0) >>> 0;
         this.regs[12] = ((cur & ~allowed) | (v & allowed)) >>> 0;
         break;
