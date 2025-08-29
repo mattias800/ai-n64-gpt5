@@ -52,6 +52,7 @@ export class CPU {
   // Minimal LL/SC state
   private llValid = false;
   private llAddr = 0 >>> 0;
+  private llIs64 = false;
 
   // Detect spinning in empty exception vector (fastboot-HLE aid)
   private vectorNopCount = 0;
@@ -517,6 +518,17 @@ export class CPU {
             this.setReg(rd, v);
             return;
           }
+          case 0x22: { // SUB rd, rs, rt (trap on overflow)
+            const a = (this.getReg(rs) | 0);
+            const b = (this.getReg(rt) | 0);
+            const r = (a - b) | 0;
+            // Overflow on subtraction when signs of a and b differ and sign of result differs from a
+            if (((a ^ b) & (a ^ r)) < 0) {
+              throw new CPUException('Overflow', this.pc >>> 0);
+            }
+            this.setReg(rd, r >>> 0);
+            return;
+          }
           case 0x23: { // SUBU rd, rs, rt
             const v = (this.getReg(rs) - this.getReg(rt)) >>> 0;
             this.setReg(rd, v);
@@ -813,6 +825,51 @@ export class CPU {
               if (this.fastbootSkipReserved) { this.warnDecode('trap_suppressed', 'teq', { rs: rs>>>0, rt: rt>>>0 }); }
               else { this.warnDecode('trap_taken', 'teq', { rs: rs>>>0, rt: rt>>>0 }); throw new CPUException('Trap', 0); }
             }
+            return;
+          }
+          // 64-bit add/sub group (MIPS64)
+          case 0x2c: { // DADD rd, rs, rt (trap on overflow)
+            const aHi = this.getRegHi(rs) >>> 0, aLo = this.getReg(rs) >>> 0;
+            const bHi = this.getRegHi(rt) >>> 0, bLo = this.getReg(rt) >>> 0;
+            const lo = (aLo + bLo) >>> 0;
+            const carry = (lo < aLo) ? 1 : 0;
+            const hi = (aHi + bHi + carry) >>> 0;
+            const aSign = (aHi >>> 31) & 1; const bSign = (bHi >>> 31) & 1; const rSign = (hi >>> 31) & 1;
+            if (aSign === bSign && rSign !== aSign) {
+              throw new CPUException('Overflow', this.pc >>> 0);
+            }
+            this.setReg64(rd, hi, lo);
+            return;
+          }
+          case 0x2d: { // DADDU rd, rs, rt
+            const aHi = this.getRegHi(rs) >>> 0, aLo = this.getReg(rs) >>> 0;
+            const bHi = this.getRegHi(rt) >>> 0, bLo = this.getReg(rt) >>> 0;
+            const lo = (aLo + bLo) >>> 0;
+            const carry = (lo < aLo) ? 1 : 0;
+            const hi = (aHi + bHi + carry) >>> 0;
+            this.setReg64(rd, hi, lo);
+            return;
+          }
+          case 0x2e: { // DSUB rd, rs, rt (trap on overflow)
+            const aHi = this.getRegHi(rs) >>> 0, aLo = this.getReg(rs) >>> 0;
+            const bHi = this.getRegHi(rt) >>> 0, bLo = this.getReg(rt) >>> 0;
+            const lo = (aLo - bLo) >>> 0;
+            const borrow = (aLo >>> 0) < (bLo >>> 0) ? 1 : 0;
+            const hi = (aHi - bHi - borrow) >>> 0;
+            const aSign = (aHi >>> 31) & 1; const bSign = (bHi >>> 31) & 1; const rSign = (hi >>> 31) & 1;
+            if (aSign !== bSign && rSign !== aSign) {
+              throw new CPUException('Overflow', this.pc >>> 0);
+            }
+            this.setReg64(rd, hi, lo);
+            return;
+          }
+          case 0x2f: { // DSUBU rd, rs, rt
+            const aHi = this.getRegHi(rs) >>> 0, aLo = this.getReg(rs) >>> 0;
+            const bHi = this.getRegHi(rt) >>> 0, bLo = this.getReg(rt) >>> 0;
+            const lo = (aLo - bLo) >>> 0;
+            const borrow = (aLo >>> 0) < (bLo >>> 0) ? 1 : 0;
+            const hi = (aHi - bHi - borrow) >>> 0;
+            this.setReg64(rd, hi, lo);
             return;
           }
           case 0x36: { // TNE rs, rt (64-bit inequality)
@@ -1511,16 +1568,56 @@ export class CPU {
         const addr = this.addrCalc(rs, imm) >>> 0;
         const v = this.loadU32TLB(addr);
         this.setReg(rt, v >>> 0);
-        this.llValid = true; this.llAddr = addr & ~3;
+        this.llValid = true; this.llAddr = (addr & ~3) >>> 0; this.llIs64 = false;
+        return;
+      }
+      case 0x34: { // LLD rt, offset(base) - load linked doubleword
+        const addr = this.addrCalc(rs, imm) >>> 0;
+        const p = addr & ~7;
+        const b0 = this.loadU8TLB(p + 0) & 0xff;
+        const b1 = this.loadU8TLB(p + 1) & 0xff;
+        const b2 = this.loadU8TLB(p + 2) & 0xff;
+        const b3 = this.loadU8TLB(p + 3) & 0xff;
+        const b4 = this.loadU8TLB(p + 4) & 0xff;
+        const b5 = this.loadU8TLB(p + 5) & 0xff;
+        const b6 = this.loadU8TLB(p + 6) & 0xff;
+        const b7 = this.loadU8TLB(p + 7) & 0xff;
+        const hi = ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) >>> 0;
+        const lo = ((b4 << 24) | (b5 << 16) | (b6 << 8) | b7) >>> 0;
+        this.setReg64(rt, hi, lo);
+        this.llValid = true; this.llAddr = (addr & ~7) >>> 0; this.llIs64 = true;
         return;
       }
       case 0x38: { // SC rt, offset(base) - store conditional (modeled as SW + success=1 when linked)
         const addr = this.addrCalc(rs, imm) >>> 0;
-        const aligned = addr & ~3;
-        const success = this.llValid && (aligned === this.llAddr);
+        const aligned = (addr & ~3) >>> 0;
+        const success = this.llValid && !this.llIs64 && (aligned === this.llAddr);
         if (success) {
           const v = this.getReg(rt) >>> 0;
           this.storeU32TLB(addr, v);
+          this.setReg(rt, 1);
+        } else {
+          this.setReg(rt, 0);
+        }
+        this.llValid = false;
+        return;
+      }
+      case 0x3c: { // SCD rt, offset(base) - store conditional doubleword
+        const addr = this.addrCalc(rs, imm) >>> 0;
+        const aligned = (addr & ~7) >>> 0;
+        const success = this.llValid && this.llIs64 && (aligned === this.llAddr);
+        if (success) {
+          const hi = this.getRegHi(rt) >>> 0;
+          const lo = this.getReg(rt) >>> 0;
+          const p = aligned;
+          this.storeU8TLB(p + 0, (hi >>> 24) & 0xff);
+          this.storeU8TLB(p + 1, (hi >>> 16) & 0xff);
+          this.storeU8TLB(p + 2, (hi >>> 8) & 0xff);
+          this.storeU8TLB(p + 3, hi & 0xff);
+          this.storeU8TLB(p + 4, (lo >>> 24) & 0xff);
+          this.storeU8TLB(p + 5, (lo >>> 16) & 0xff);
+          this.storeU8TLB(p + 6, (lo >>> 8) & 0xff);
+          this.storeU8TLB(p + 7, lo & 0xff);
           this.setReg(rt, 1);
         } else {
           this.setReg(rt, 0);
@@ -1584,8 +1681,14 @@ export class CPU {
   }
 
   private invalidateLL(addr: number): void {
-    const aligned = (addr >>> 0) & ~3;
-    if (this.llValid && this.llAddr === aligned) this.llValid = false;
+    const a4 = (addr >>> 0) & ~3;
+    const a8 = (addr >>> 0) & ~7;
+    if (!this.llValid) return;
+    if (this.llIs64) {
+      if (this.llAddr === a8) this.llValid = false;
+    } else {
+      if (this.llAddr === a4) this.llValid = false;
+    }
   }
 
   // Emit a one-shot decode warning by unique key
