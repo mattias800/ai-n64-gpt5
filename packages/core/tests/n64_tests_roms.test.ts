@@ -28,6 +28,7 @@ const ROM_DIR = process.env.N64_TESTS_ROM_DIR
 const MAX_CYCLES = Number.isFinite(Number(process.env.N64_TESTS_MAX_CYCLES))
   ? parseInt(process.env.N64_TESTS_MAX_CYCLES as string, 10)
   : 10_000_000;
+const PATTERN = process.env.N64_TESTS_PATTERN ? new RegExp(process.env.N64_TESTS_PATTERN) : null;
 
 const START_PC = 0x80001000 >>> 0; // as per n64-tests README for young emulators
 
@@ -273,7 +274,10 @@ function runRomAndGetR30(romPath: string): number {
   return r30 | 0;
 }
 
-const roms = listZ64(ROM_DIR);
+let roms = listZ64(ROM_DIR);
+if (PATTERN) {
+  roms = roms.filter((p) => PATTERN!.test(path.basename(p)));
+}
 const suite = (ENABLED && roms.length > 0) ? describe : describe.skip;
 
 suite('n64-tests ROMs (opt-in; set N64_TESTS=1)', () => {
