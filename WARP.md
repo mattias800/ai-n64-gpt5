@@ -34,11 +34,14 @@ ROM-backed n64-tests harness (opt-in)
 - ROM discovery path (default): test-roms/n64-tests/roms
   Override via N64_TESTS_ROM_DIR.
 - Max cycle budget (default 10,000,000 cycles / test): N64_TESTS_MAX_CYCLES
+- Regex filter for selecting a subset of ROMs by filename: N64_TESTS_PATTERN (e.g. "addiu|daddiu").
 - The harness is robust to a “young emulator” boot path: it pre-stages ROM bytes in RDRAM and forces PC to 0x80001000 so tests can run without real IPL.
 
 Examples:
 - Run only the n64-tests harness:
   N64_TESTS=1 npx vitest run packages/core/tests/n64_tests_roms.test.ts
+- Filter down to specific ROMs (regex on filenames):
+  N64_TESTS=1 N64_TESTS_PATTERN="addiu|daddiu" npx vitest run packages/core/tests/n64_tests_roms.test.ts
 - Override ROM directory:
   N64_TESTS=1 N64_TESTS_ROM_DIR="$(pwd)/third_party/n64-tests/roms" npx vitest run packages/core/tests/n64_tests_roms.test.ts
 - Bump max cycles for slow environments:
