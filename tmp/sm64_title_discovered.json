@@ -1,0 +1,35 @@
+{
+  "video": {
+    "width": "0x140",
+    "height": "0xf0",
+    "origin": "0xf000"
+  },
+  "timing": {
+    "start": 2,
+    "interval": 3,
+    "frames": 1,
+    "spOffset": 1
+  },
+  "f3dex": {
+    "strideWords": 256,
+    "bgStart": "0x001F",
+    "bgEnd": "0x07FF"
+  },
+  "piLoads": [],
+  "frames": [
+    {
+      "dlWords": [
+        "0xf0000100",
+        "0x54800",
+        "0xfd080000",
+        "0x55800",
+        "0xf2000000",
+        "0x3c03c",
+        "0xe4050050",
+        "0x90090",
+        "0xdf000000",
+        "0x0"
+      ]
+    }
+  ]
+}

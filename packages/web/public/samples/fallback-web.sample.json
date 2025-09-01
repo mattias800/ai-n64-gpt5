@@ -1,0 +1,22 @@
+{
+  "video": {
+    "width": 192,
+    "height": 120,
+    "origin": "0xF000"
+  },
+  "timing": {
+    "start": 2,
+    "interval": 3,
+    "frames": 2,
+    "spOffset": 1
+  },
+  "bg": {
+    "start5551": "0x001F",
+    "end5551": "0x07FF"
+  },
+  "assets": {},
+  "expectedCrc32": [
+    "139f1b8f",
+    "139f1b8f"
+  ]
+}

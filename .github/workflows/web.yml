@@ -1,0 +1,29 @@
+name: web-fallback
+
+on:
+  push:
+    branches: [ main, master, trunk, dev, develop ]
+  pull_request:
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - name: Install
+        run: npm ci
+      - name: Build
+        run: npm run build
+      - name: Web CRC check (fallback sample)
+        run: npm run web:crc:check
+      - name: Web unit tests (core + F3D + F3DEX)
+        run: |
+          npm run web:test:web
+          npm run web:test:f3d
+          npm run test -- packages/web/tests/f3dex_table_core.test.ts

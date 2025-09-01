@@ -1,0 +1,174 @@
+{
+  "dir": "tmp/stitch_sweep/6x2",
+  "total": 27,
+  "top": [
+    {
+      "file": "tmp/stitch_sweep/6x2/gap2/off_1d8310_ci4_stitch6x2_gap2_2_w128_h32_tlut0_pix200_pal0_rstep7f0.png",
+      "score": 71.8903865752304,
+      "stddev": 71.24851416922453,
+      "grad": 1.2837448120117188,
+      "hash64": "03ffff0303030303"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x2/gap2/off_1d8310_ci4_stitch6x2_gap2_2_w128_h32_tlut0_pix200_pal0_rstep7f8.png",
+      "score": 71.8903865752304,
+      "stddev": 71.24851416922453,
+      "grad": 1.2837448120117188,
+      "hash64": "03ffff0303030303"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x2/gap2/off_1d8310_ci4_stitch6x2_gap2_2_w128_h32_tlut0_pix200_pal0_rstep7fe.png",
+      "score": 71.8903865752304,
+      "stddev": 71.24851416922453,
+      "grad": 1.2837448120117188,
+      "hash64": "03ffff0303030303"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x2/gap2/off_1d8310_ci4_stitch6x2_gap2_2_w128_h32_tlut0_pix200_pal0_rstep7ff.png",
+      "score": 71.8903865752304,
+      "stddev": 71.24851416922453,
+      "grad": 1.2837448120117188,
+      "hash64": "03ffff0303030303"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x2/gap2/off_1d8310_ci4_stitch6x2_gap2_2_w128_h32_tlut0_pix200_pal0_rstep800.png",
+      "score": 71.8903865752304,
+      "stddev": 71.24851416922453,
+      "grad": 1.2837448120117188,
+      "hash64": "03ffff0303030303"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x2/gap2/off_1d8310_ci4_stitch6x2_gap2_2_w128_h32_tlut0_pix200_pal0_rstep801.png",
+      "score": 71.8903865752304,
+      "stddev": 71.24851416922453,
+      "grad": 1.2837448120117188,
+      "hash64": "03ffff0303030303"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x2/gap2/off_1d8310_ci4_stitch6x2_gap2_2_w128_h32_tlut0_pix200_pal0_rstep802.png",
+      "score": 71.8903865752304,
+      "stddev": 71.24851416922453,
+      "grad": 1.2837448120117188,
+      "hash64": "03ffff0303030303"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x2/gap2/off_1d8310_ci4_stitch6x2_gap2_2_w128_h32_tlut0_pix200_pal0_rstep808.png",
+      "score": 71.8903865752304,
+      "stddev": 71.24851416922453,
+      "grad": 1.2837448120117188,
+      "hash64": "03ffff0303030303"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x2/gap2/off_1d8310_ci4_stitch6x2_gap2_2_w128_h32_tlut0_pix200_pal0_rstep810.png",
+      "score": 71.8903865752304,
+      "stddev": 71.24851416922453,
+      "grad": 1.2837448120117188,
+      "hash64": "03ffff0303030303"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x2/gap1/off_1d8310_ci4_stitch6x2_gap1_1_w128_h32_tlut0_pix200_pal0_rstep7f0.png",
+      "score": 71.86826871405401,
+      "stddev": 71.22528241644659,
+      "grad": 1.2859725952148438,
+      "hash64": "03ffff0303030303"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x2/gap1/off_1d8310_ci4_stitch6x2_gap1_1_w128_h32_tlut0_pix200_pal0_rstep7f8.png",
+      "score": 71.86826871405401,
+      "stddev": 71.22528241644659,
+      "grad": 1.2859725952148438,
+      "hash64": "03ffff0303030303"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x2/gap1/off_1d8310_ci4_stitch6x2_gap1_1_w128_h32_tlut0_pix200_pal0_rstep7fe.png",
+      "score": 71.86826871405401,
+      "stddev": 71.22528241644659,
+      "grad": 1.2859725952148438,
+      "hash64": "03ffff0303030303"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x2/gap1/off_1d8310_ci4_stitch6x2_gap1_1_w128_h32_tlut0_pix200_pal0_rstep7ff.png",
+      "score": 71.86826871405401,
+      "stddev": 71.22528241644659,
+      "grad": 1.2859725952148438,
+      "hash64": "03ffff0303030303"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x2/gap1/off_1d8310_ci4_stitch6x2_gap1_1_w128_h32_tlut0_pix200_pal0_rstep800.png",
+      "score": 71.86826871405401,
+      "stddev": 71.22528241644659,
+      "grad": 1.2859725952148438,
+      "hash64": "03ffff0303030303"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x2/gap1/off_1d8310_ci4_stitch6x2_gap1_1_w128_h32_tlut0_pix200_pal0_rstep801.png",
+      "score": 71.86826871405401,
+      "stddev": 71.22528241644659,
+      "grad": 1.2859725952148438,
+      "hash64": "03ffff0303030303"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x2/gap1/off_1d8310_ci4_stitch6x2_gap1_1_w128_h32_tlut0_pix200_pal0_rstep802.png",
+      "score": 71.86826871405401,
+      "stddev": 71.22528241644659,
+      "grad": 1.2859725952148438,
+      "hash64": "03ffff0303030303"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x2/gap1/off_1d8310_ci4_stitch6x2_gap1_1_w128_h32_tlut0_pix200_pal0_rstep808.png",
+      "score": 71.86826871405401,
+      "stddev": 71.22528241644659,
+      "grad": 1.2859725952148438,
+      "hash64": "03ffff0303030303"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x2/gap1/off_1d8310_ci4_stitch6x2_gap1_1_w128_h32_tlut0_pix200_pal0_rstep810.png",
+      "score": 71.86826871405401,
+      "stddev": 71.22528241644659,
+      "grad": 1.2859725952148438,
+      "hash64": "03ffff0303030303"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x2/gap0/off_1d8310_ci4_stitch6x2_gap0_0_w128_h32_tlut0_pix200_pal0_rstep7f0.png",
+      "score": 71.49765461450946,
+      "stddev": 71.20197170740497,
+      "grad": 0.5913658142089844,
+      "hash64": "03ffff0303030303"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x2/gap0/off_1d8310_ci4_stitch6x2_gap0_0_w128_h32_tlut0_pix200_pal0_rstep7f8.png",
+      "score": 71.49765461450946,
+      "stddev": 71.20197170740497,
+      "grad": 0.5913658142089844,
+      "hash64": "03ffff0303030303"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x2/gap0/off_1d8310_ci4_stitch6x2_gap0_0_w128_h32_tlut0_pix200_pal0_rstep7fe.png",
+      "score": 71.49765461450946,
+      "stddev": 71.20197170740497,
+      "grad": 0.5913658142089844,
+      "hash64": "03ffff0303030303"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x2/gap0/off_1d8310_ci4_stitch6x2_gap0_0_w128_h32_tlut0_pix200_pal0_rstep7ff.png",
+      "score": 71.49765461450946,
+      "stddev": 71.20197170740497,
+      "grad": 0.5913658142089844,
+      "hash64": "03ffff0303030303"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x2/gap0/off_1d8310_ci4_stitch6x2_gap0_0_w128_h32_tlut0_pix200_pal0_rstep800.png",
+      "score": 71.49765461450946,
+      "stddev": 71.20197170740497,
+      "grad": 0.5913658142089844,
+      "hash64": "03ffff0303030303"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x2/gap0/off_1d8310_ci4_stitch6x2_gap0_0_w128_h32_tlut0_pix200_pal0_rstep801.png",
+      "score": 71.49765461450946,
+      "stddev": 71.20197170740497,
+      "grad": 0.5913658142089844,
+      "hash64": "03ffff0303030303"
+    }
+  ]
+}

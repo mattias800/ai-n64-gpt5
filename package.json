@@ -11,7 +11,20 @@
     "clean": "tsc -b --clean",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:n64-tests": "vitest run packages/core/tests/n64_tests_roms.test.ts"
+    "test:n64-tests": "vitest run packages/core/tests/n64_tests_roms.test.ts",
+    "web:dev": "npm run dev -w @n64/web",
+    "web:build": "npm run build -w @n64/web",
+    "web:preview": "npm run preview -w @n64/web",
+    "web:crc": "node packages/web/dist/cli.js sm64-title",
+    "web:crc:check": "node packages/web/dist/cli.js sm64-title --config packages/web/public/samples/fallback-web.sample.json",
+    "web:crc:f3d": "node packages/web/dist/cli.js f3d-run-table packages/web/public/samples/f3d_table.sample.json",
+    "web:crc:f3dex": "node packages/web/dist/cli.js f3dex-run-table packages/web/public/samples/f3dex_table.sample.json",
+    "web:crc:f3dex:rom": "node packages/web/dist/cli.js f3dex-rom-run packages/web/public/samples/f3dex_rom.sample.json --rom ./mario64.z64",
+    "web:test:web": "vitest run packages/web/tests/sm64_title_core.test.ts",
+    "web:test:f3d": "vitest run packages/web/tests/f3d_table_core.test.ts",
+    "web:crc:update": "node packages/web/dist/gen_expected_crc.js",
+    "web:test:rom": "vitest run packages/web/tests/sm64_title_rom_optional.test.ts",
+    "headless:discover": "node packages/headless/dist/discover_f3dex.js"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

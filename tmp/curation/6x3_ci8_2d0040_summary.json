@@ -1,0 +1,34 @@
+{
+  "dir": "tmp/stitch_sweep/6x3_ci8_2d0040",
+  "total": 4,
+  "top": [
+    {
+      "file": "tmp/stitch_sweep/6x3_ci8_2d0040/off_2d0040_ci8_stitch6x3_gap2_2_w128_h32_tlut200_pix1200_rstep1000.png",
+      "score": 52.526584092703295,
+      "stddev": 50.853148881521655,
+      "grad": 3.3468704223632812,
+      "hash64": "1f0303031f1f1f1f"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x3_ci8_2d0040/off_2d0040_ci8_stitch6x3_gap2_2_w128_h32_tlut200_pix1000_rstep1000.png",
+      "score": 52.51851433222296,
+      "stddev": 50.852954563546206,
+      "grad": 3.3311195373535156,
+      "hash64": "1f0303031f1f1f1f"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x3_ci8_2d0040/off_2d0040_ci8_stitch6x3_gap2_2_w128_h32_tlut200_pix800_rstep1000.png",
+      "score": 52.45928966276573,
+      "stddev": 50.79981433622764,
+      "grad": 3.318950653076172,
+      "hash64": "1f0303031f1f1f1f"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x3_ci8_2d0040/off_2d0040_ci8_stitch6x3_gap2_2_w128_h32_tlut200_pix400_rstep1000.png",
+      "score": 52.44182041614286,
+      "stddev": 50.77767590015165,
+      "grad": 3.328289031982422,
+      "hash64": "1f0303031f1f1f1f"
+    }
+  ]
+}

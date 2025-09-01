@@ -1,0 +1,20 @@
+{
+  "video": {
+    "width": "0x140",
+    "height": "0xf0",
+    "origin": "0xf000"
+  },
+  "timing": {
+    "start": 2,
+    "interval": 3,
+    "frames": 0,
+    "spOffset": 1
+  },
+  "f3dex": {
+    "strideWords": 256,
+    "bgStart": "0x001F",
+    "bgEnd": "0x07FF"
+  },
+  "piLoads": [],
+  "frames": []
+}

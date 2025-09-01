@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "type": "module",
   "bin": {
-    "n64-headless": "dist/cli.js"
+    "n64-headless": "dist/cli.js",
+    "n64-discover-f3dex": "dist/discover_f3dex.js"
   },
   "scripts": {
     "build": "tsc -b",

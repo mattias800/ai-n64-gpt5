@@ -1,0 +1,13 @@
+{
+  "dir": "tmp/stitch3_wide/0x1d8310",
+  "total": 1,
+  "top": [
+    {
+      "file": "tmp/stitch3_wide/0x1d8310/off_1d8310_ci4_stitch6x3_gap2_2_w128_h32_tlut0_pix0_pal0.png",
+      "score": 68.90270848404941,
+      "stddev": 66.87907827571608,
+      "grad": 4.047260416666667,
+      "hash64": "00ffff00ffffffff"
+    }
+  ]
+}

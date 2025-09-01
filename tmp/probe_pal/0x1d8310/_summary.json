@@ -1,0 +1,62 @@
+{
+  "dir": "tmp/probe_pal/0x1d8310",
+  "total": 8,
+  "top": [
+    {
+      "file": "tmp/probe_pal/0x1d8310/off_1d8310_ci4_w128_h32_tlut0_pix0_pal0.png",
+      "score": 72.72747904906237,
+      "stddev": 72.03160231295125,
+      "grad": 1.3917534722222222,
+      "hash64": "037f7f0303030303"
+    },
+    {
+      "file": "tmp/probe_pal/0x1d8310/off_1d8310_ci4_w128_h32_tlut0_pix0_pal1.png",
+      "score": 72.72747904906237,
+      "stddev": 72.03160231295125,
+      "grad": 1.3917534722222222,
+      "hash64": "037f7f0303030303"
+    },
+    {
+      "file": "tmp/probe_pal/0x1d8310/off_1d8310_ci4_w128_h32_tlut0_pix0_pal2.png",
+      "score": 72.72747904906237,
+      "stddev": 72.03160231295125,
+      "grad": 1.3917534722222222,
+      "hash64": "037f7f0303030303"
+    },
+    {
+      "file": "tmp/probe_pal/0x1d8310/off_1d8310_ci4_w128_h32_tlut0_pix0_pal3.png",
+      "score": 72.72747904906237,
+      "stddev": 72.03160231295125,
+      "grad": 1.3917534722222222,
+      "hash64": "037f7f0303030303"
+    },
+    {
+      "file": "tmp/probe_pal/0x1d8310/off_1d8310_ci4_w128_h32_tlut0_pix0_pal4.png",
+      "score": 72.72747904906237,
+      "stddev": 72.03160231295125,
+      "grad": 1.3917534722222222,
+      "hash64": "037f7f0303030303"
+    },
+    {
+      "file": "tmp/probe_pal/0x1d8310/off_1d8310_ci4_w128_h32_tlut0_pix0_pal5.png",
+      "score": 72.72747904906237,
+      "stddev": 72.03160231295125,
+      "grad": 1.3917534722222222,
+      "hash64": "037f7f0303030303"
+    },
+    {
+      "file": "tmp/probe_pal/0x1d8310/off_1d8310_ci4_w128_h32_tlut0_pix0_pal6.png",
+      "score": 72.72747904906237,
+      "stddev": 72.03160231295125,
+      "grad": 1.3917534722222222,
+      "hash64": "037f7f0303030303"
+    },
+    {
+      "file": "tmp/probe_pal/0x1d8310/off_1d8310_ci4_w128_h32_tlut0_pix0_pal7.png",
+      "score": 72.72747904906237,
+      "stddev": 72.03160231295125,
+      "grad": 1.3917534722222222,
+      "hash64": "037f7f0303030303"
+    }
+  ]
+}

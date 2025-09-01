@@ -1,0 +1,7 @@
+{
+  "video": { "width": 192, "height": 120, "origin": "0xF000" },
+  "timing": { "start": 2, "interval": 3, "frames": 2, "spOffset": 1 },
+  "f3dex": { "strideWords": 256, "bgStart": "0x001F", "bgEnd": "0x07FF" },
+  "piLoads": [],
+  "frames": []
+}

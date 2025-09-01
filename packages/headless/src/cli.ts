@@ -64,14 +64,439 @@ function printUsage() {
    n64-headless rom-boot-run <rom.z64> [--cycles N] [--vi-interval CYC] [--width W] [--height H] [--snapshot path.png]
      [--discover] [--boot path.json] [--bridge] [--bridge-any] [--bridge-log] [--ipl-hle] [--jump-header]
      [--vi-init] [--fastboot-hle]
+     [--sram-file path.bin] [--sram-size BYTES] [--sram-save-on-exit]
+     [--flash-file path.bin] [--flash-size BYTES] [--flash-save-on-exit]
+     [--timing-profile dev|fast|realistic] [--trace-timing [path.csv]]
+  n64-headless rom-scan-mio0 <rom.z64> [--out path.json] [--extract-dir dir] [--limit N] [--min-size BYTES]
+  n64-headless curate-images <dir> [--top N] [--out path.json] [--copy-top dir] [--recursive]
  
  Examples:
    n64-headless sm64-demo --frames 1
    n64-headless sm64-demo --frames 2 --snapshot tmp/sm64_2f.ppm
    n64-headless f3dex-rom-run tmp/rom_demo.json --snapshot tmp/rom.png
-   n64-headless rom-boot-run mario64.z64 --cycles 5000000 --vi-interval 10000 --width 320 --height 240 --snapshot tmp/boot/boot.png
+   n64-headless rom-boot-run mario64.z64 --cycles 5000000 --vi-interval 10000 --width 320 --height 240 --snapshot tmp/boot/boot.png --sram-file saves/mario64.sram --sram-save-on-exit
+   n64-headless rom-boot-run banjo.z64 --flash-file saves/banjo.flash --flash-save-on-exit
+   n64-headless rom-scan-mio0 mario64.z64 --out tmp/mio0_scan.json --extract-dir tmp/mio0
  `);
  }
+
+async function runRomScanMio0(args: string[]) {
+  const file = args.find(a => !a.startsWith('--'));
+  if (!file) { console.error('rom-scan-mio0 requires a ROM file path'); process.exit(1); }
+  const opts: Record<string, string> = {};
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a.startsWith('--')) {
+      const key = a.slice(2);
+      const next = (i + 1 < args.length) ? args[i + 1] : undefined;
+      const val = (next && !next.startsWith('--')) ? args[++i]! : '1';
+      opts[key] = val;
+    }
+  }
+  const outPath = opts['out'];
+  const extractDir = opts['extract-dir'] || opts['extractDir'];
+  const limit = parseNum(opts['limit'], 0);
+  const minSize = parseNum(opts['min-size'] || opts['minSize'], 0);
+
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const rom = fs.readFileSync(file);
+  const romU8 = new Uint8Array(rom.buffer, rom.byteOffset, rom.length);
+
+  type Entry = { off: number; size: number };
+  const entries: Entry[] = [];
+  let count = 0;
+  for (let i = 0; i + 4 <= romU8.length; i++) {
+    if (romU8[i] === 0x4d /*'M'*/ && romU8[i+1] === 0x49 /*'I'*/ && romU8[i+2] === 0x4f /*'O'*/ && romU8[i+3] === 0x30 /*'0'*/) {
+      try {
+        const data = decompressMIO0(romU8, i);
+        const size = data.length >>> 0;
+        if (size >= minSize) {
+          entries.push({ off: i >>> 0, size });
+          if (extractDir) {
+            const dir = path.resolve(extractDir);
+            if (!(fs as any).existsSync(dir)) (fs as any).mkdirSync(dir, { recursive: true });
+            const outBin = path.join(dir, `mio0_${i.toString(16)}_decomp.bin`);
+            (fs as any).writeFileSync(outBin, Buffer.from(data));
+          }
+          count++;
+          if (limit > 0 && count >= limit) break;
+        }
+      } catch {
+        // not a valid MIO0 block; skip
+      }
+    }
+  }
+  // sort by size descending
+  entries.sort((a,b) => b.size - a.size);
+  const summary = {
+    rom: file,
+    count: entries.length,
+    entries: entries.map(e => ({ off: `0x${e.off.toString(16)}`, size: e.size }))
+  };
+  if (outPath) {
+    const dir = path.dirname(outPath);
+    if (!(fs as any).existsSync(dir)) (fs as any).mkdirSync(dir, { recursive: true });
+    (fs as any).writeFileSync(outPath, JSON.stringify(summary, null, 2));
+    console.log(`[mio0] wrote ${outPath} (${entries.length} entries)`);
+  }
+  console.log(JSON.stringify(summary, null, 2));
+}
+
+async function runCurateImages(args: string[]) {
+  const root = args.find(a => !a.startsWith('--'));
+  if (!root) { console.error('curate-images requires a directory path'); process.exit(1); }
+  const opts: Record<string, string> = {};
+  for (let i = 0; i < args.length; i++) { const a = args[i]!; if (a.startsWith('--')) { const key = a.slice(2); const next = (i + 1 < args.length) ? args[i + 1] : undefined; const val = (next && !next.startsWith('--')) ? args[++i]! : '1'; opts[key] = val; } }
+  const top = parseNum(opts['top'], 16);
+  const outPath = opts['out'] ? String(opts['out']) : undefined;
+  const copyTop = opts['copy-top'] ? String(opts['copy-top']) : undefined;
+  const recursive = Object.prototype.hasOwnProperty.call(opts, 'recursive');
+
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const mod: any = await import('pngjs');
+  const PNG = mod.PNG || mod.default?.PNG || mod.default || mod;
+  const PNGSync = (mod as any).PNG?.sync || (mod as any).default?.PNG?.sync || (mod as any).sync;
+
+  const listPngs = (dir: string): string[] => {
+    const out: string[] = [];
+    const entries = (fs as any).readdirSync(dir, { withFileTypes: true }) as any[];
+    for (const e of entries) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory && e.isDirectory()) { if (recursive) out.push(...listPngs(p)); }
+      else if (String(e.name).toLowerCase().endsWith('.png')) out.push(p);
+    }
+    return out;
+  };
+
+  const files = listPngs(root);
+  if (files.length === 0) { console.error(`[curate] no PNG files in ${root}`); process.exit(1); }
+
+  type Entry = { file: string; score: number; stddev: number; grad: number; hash64: string };
+  const results: Entry[] = [];
+
+  function toGray(r: number, g: number, b: number): number { return Math.round(0.299 * r + 0.587 * g + 0.114 * b) >>> 0; }
+  function aHash64(w: number, h: number, rgba: Uint8Array): string {
+    const gx = 8, gy = 8;
+    const samples: number[] = [];
+    let sum = 0;
+    for (let j = 0; j < gy; j++) {
+      for (let i = 0; i < gx; i++) {
+        const cx = Math.min(w - 1, Math.max(0, Math.floor(((i + 0.5) * w) / gx)));
+        const cy = Math.min(h - 1, Math.max(0, Math.floor(((j + 0.5) * h) / gy)));
+        const idx = (cy * w + cx) * 4;
+        const g = toGray(rgba[idx]!, rgba[idx+1]!, rgba[idx+2]!);
+        samples.push(g);
+        sum += g;
+      }
+    }
+    const avg = sum / (gx * gy);
+    let bits = '';
+    for (const v of samples) bits += (v >= avg ? '1' : '0');
+    // Convert 64-bit binary string to hex (16 hex digits)
+    let hex = '';
+    for (let i = 0; i < 64; i += 4) {
+      const nibble = parseInt(bits.slice(i, i + 4), 2) & 0xF;
+      hex += nibble.toString(16);
+    }
+    return hex;
+  }
+
+  for (const f of files) {
+    try {
+      const buf = (fs as any).readFileSync(f);
+      const png = PNGSync?.read ? PNGSync.read(buf) : null;
+      const w = png?.width >>> 0;
+      const h = png?.height >>> 0;
+      const data: Uint8Array = png?.data;
+      if (!data || !w || !h) continue;
+      const N = w * h;
+      // Mean and stddev of grayscale
+      let sum = 0;
+      const gray = new Uint8Array(N);
+      for (let i = 0, pi = 0; i < N; i++, pi += 4) {
+        const g = toGray(data[pi]!, data[pi+1]!, data[pi+2]!);
+        gray[i] = g;
+        sum += g;
+      }
+      const mean = sum / N;
+      let varSum = 0;
+      for (let i = 0; i < N; i++) { const d = gray[i]! - mean; varSum += d * d; }
+      const stddev = Math.sqrt(varSum / N);
+      // Gradient magnitude (simple abs diffs)
+      let gsum = 0;
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const i = y * w + x;
+          const v = gray[i]!;
+          const vx = x > 0 ? Math.abs(v - gray[i - 1]!) : 0;
+          const vy = y > 0 ? Math.abs(v - gray[i - w]!) : 0;
+          gsum += vx + vy;
+        }
+      }
+      const gradAvg = gsum / (N * 2);
+      const score = stddev + 0.5 * gradAvg;
+      const hash64 = aHash64(w, h, data);
+      results.push({ file: f, score, stddev, grad: gradAvg, hash64 });
+    } catch {}
+  }
+
+  results.sort((a,b) => b.score - a.score);
+  const topN = results.slice(0, Math.min(top, results.length));
+
+  if (outPath) {
+    try {
+      await (await import('node:fs')).promises.mkdir((await import('node:path')).dirname(outPath), { recursive: true });
+      await (await import('node:fs')).promises.writeFile(outPath, JSON.stringify({ dir: root, total: results.length, top: topN }, null, 2), 'utf8');
+      console.log(`[curate] wrote ${outPath}`);
+    } catch (e) {
+      console.error('[curate] failed to write summary:', e);
+    }
+  }
+  if (copyTop) {
+    try {
+      (fs as any).mkdirSync(copyTop, { recursive: true });
+      for (const e of topN) {
+        const base = path.basename(e.file);
+        (fs as any).copyFileSync(e.file, path.join(copyTop, base));
+      }
+      console.log(`[curate] copied ${topN.length} files to ${copyTop}`);
+    } catch (e) {
+      console.error('[curate] failed to copy top files:', e);
+    }
+  }
+
+  console.log(JSON.stringify({ command: 'curate-images', dir: root, total: results.length, top: topN }, null, 2));
+}
+
+async function runRomProbeMio0(args: string[]) {
+  const file = args.find(a => !a.startsWith('--'));
+  if (!file) { console.error('rom-probe-mio0 requires a ROM file path'); process.exit(1); }
+  const opts: Record<string, string> = {};
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a.startsWith('--')) {
+      const key = a.slice(2);
+      const next = (i + 1 < args.length) ? args[i + 1] : undefined;
+      const val = (next && !next.startsWith('--')) ? args[++i]! : '1';
+      opts[key] = val;
+    }
+  }
+  const off = parseNum(opts['off'] || opts['offset'], 0);
+  if (!off) { console.error('--off is required'); process.exit(1); }
+  const width = parseNum(opts['w'] || opts['width'], 192);
+  const height = parseNum(opts['h'] || opts['height'], 120);
+  const x = parseNum(opts['x'], 32);
+  const y = parseNum(opts['y'], 20);
+  const tileW = parseNum(opts['tile-w'] || opts['tileW'], 64);
+  const tileH = parseNum(opts['tile-h'] || opts['tileH'], 32);
+  const format = String(opts['format'] || 'ci8').toLowerCase();
+  const palIdx = parseNum(opts['pal'] || opts['palette'], 0) & 0xF;
+  const tlutOff = parseNum(opts['tlut-off'] || opts['tlutOff'], 0);
+  const pixOff = parseNum(opts['pix-off'] || opts['pixOff'], 0x200);
+  const outDir = String(opts['outdir'] || opts['out-dir'] || 'tmp/probe');
+  const sweep = Object.prototype.hasOwnProperty.call(opts, 'sweep');
+  const stitch = Object.prototype.hasOwnProperty.call(opts, 'stitch');
+  const stitchCount = parseNum(opts['stitch-count'] || opts['stitchCount'], 4);
+  const stitchGap = parseNum(opts['stitch-gap'] || opts['stitchGap'], 2);
+  const stitchStepBytes = parseNum(opts['stitch-step'] || opts['stitchStep'], 0);
+  const stitchRows = parseNum(opts['stitch-rows'] || opts['stitchRows'], 1);
+  const stitchRowGap = parseNum(opts['stitch-row-gap'] || opts['stitchRowGap'], 2);
+  const stitchStepRowBytes = parseNum(opts['stitch-step-row'] || opts['stitchStepRow'], 0);
+
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const romBuf = fs.readFileSync(file);
+  const romU8 = new Uint8Array(romBuf.buffer, romBuf.byteOffset, romBuf.length);
+
+  let decomp: Uint8Array;
+  try { decomp = decompressMIO0(romU8, off); } catch (e) { console.error('Failed to decompress MIO0 at off=0x' + off.toString(16), e); process.exit(1); return; }
+
+  // Prepare system
+  const rdram = new RDRAM(8 * 1024 * 1024);
+  const bus = new Bus(rdram);
+  const cpu = new CPU(bus);
+  const sys = new System(cpu, bus);
+
+  // Configure VI so we can scanout
+  const fbOrigin = 0xF000 >>> 0;
+  (bus.vi as any).writeU32(0x14, fbOrigin >>> 0);
+  (bus.vi as any).writeU32(0x18, width >>> 0);
+
+  // Choose a DRAM base to copy decompressed blob
+  const base = 0x300000 >>> 0;
+  for (let i = 0; i < decomp.length; i++) bus.storeU8((base + i) >>> 0, decomp[i]!);
+  // Scratch area for any expanded CI4 -> CI8 buffers
+  const scratchBase = (((base + decomp.length + 0x1000) >>> 0) & ~0xFFF) >>> 0;
+  let nextScratch = scratchBase >>> 0;
+
+  // Helper to execute one hypothesis and write snapshot using the simpler RSPDL path
+  async function execOne(tag: string, fmt: 'CI8'|'CI4', tlutRel: number, pixRel: number, W: number, H: number, pal?: number) {
+    const tlutAddr = (base + (tlutRel >>> 0)) >>> 0;
+    let pixAddrUse = (base + (pixRel >>> 0)) >>> 0;
+
+    // If CI4, expand to CI8 with palette bank offset pal*16
+    if (fmt === 'CI4') {
+      const total = (W >>> 0) * (H >>> 0);
+      const bytesNeeded = (total + 0) >>> 0;
+      const dst = nextScratch >>> 0;
+      nextScratch = (nextScratch + bytesNeeded + 0x10) >>> 0;
+      const palBase = ((pal ?? 0) & 0xF) * 16;
+      // Expand from the decompressed source directly
+      for (let i = 0; i < total; i++) {
+        const srcByte = decomp[(pixRel >>> 0) + (i >> 1)] ?? 0;
+        const nib = ((i & 1) === 0) ? ((srcByte >>> 4) & 0xF) : (srcByte & 0xF);
+        const idx = (palBase + nib) & 0xFF;
+        bus.storeU8((dst + i) >>> 0, idx >>> 0);
+      }
+      pixAddrUse = dst >>> 0;
+      fmt = 'CI8';
+    }
+
+    // Build a tiny UC DL: Gradient + SetTLUT + DrawCI8/CI4 + End
+    const strideWords = 64 >>> 0;
+    const dlBase = 0xA0000 >>> 0;
+    const dlAddr = (dlBase + 0x100) >>> 0;
+    const start = 2, interval = 3, frames = 1, spOffset = 1;
+
+    // Write UC ops via helper (uses the same path as uc-run)
+    const cmds: any[] = [
+      { op: 'Gradient', bgStart: ((0<<11)|(0<<6)|(31<<1)|1)>>>0, bgEnd: ((0<<11)|(31<<6)|(31<<1)|1)>>>0 },
+      { op: 'SetTLUT', tlutAddr: tlutAddr>>>0, count: (fmt==='CI8'?256:16) >>> 0 },
+    ];
+    if (fmt === 'CI8') cmds.push({ op: 'DrawCI8', w: W>>>0, h: H>>>0, addr: pixAddrUse>>>0, x: x>>>0, y: y>>>0 });
+    else cmds.push({ op: 'DrawCI4', w: W>>>0, h: H>>>0, addr: pixAddrUse>>>0, x: x>>>0, y: y>>>0 });
+    cmds.push({ op: 'End' });
+    writeUcAsRspdl(bus as any, dlAddr>>>0, cmds, strideWords);
+
+    const total = start + interval * frames + 2;
+    const { frames: imgs } = scheduleRSPDLFramesAndRun(
+      cpu, bus, sys, fbOrigin, width, height,
+      dlAddr>>>0, frames, start, interval, total, spOffset, strideWords,
+    );
+    const outImg = (imgs && imgs.length > 0) ? imgs[0]! : viScanout(bus, width, height);
+    await (async () => {
+      const dir = path.resolve(outDir); if (!(fs as any).existsSync(dir)) (fs as any).mkdirSync(dir, { recursive: true });
+      const fname = `${tag}.png`;
+      await maybeWriteImage(outImg, width, height, path.join(dir, fname));
+    })();
+  }
+
+  async function execStitch(tag: string, fmtIn: 'CI8'|'CI4', tlutRel: number, pixRelStart: number, W: number, H: number, pal: number|undefined, count: number, gap: number, stepBytesOpt: number, rowCount: number, rowGap: number, rowStepBytesOpt: number) {
+    const tlutAddr = (base + (tlutRel >>> 0)) >>> 0;
+    const strideWords = 128 >>> 0;
+    const dlBase = 0xB0000 >>> 0;
+    const dlAddr = (dlBase + 0x100) >>> 0;
+    const start = 2, interval = 3, frames = 1, spOffset = 1;
+
+    const cmds: any[] = [
+      { op: 'Gradient', bgStart: ((0<<11)|(0<<6)|(31<<1)|1)>>>0, bgEnd: ((0<<11)|(31<<6)|(31<<1)|1)>>>0 },
+      { op: 'SetTLUT', tlutAddr: tlutAddr>>>0, count: (fmtIn==='CI8'?256:16) >>> 0 },
+    ];
+    const stepDefault = fmtIn === 'CI8' ? ((W>>>0)*(H>>>0)) >>> 0 : ((((W>>>0)*(H>>>0))>>>1) >>> 0);
+    const stepBytes = (stepBytesOpt && stepBytesOpt > 0) ? (stepBytesOpt>>>0) : stepDefault;
+    const rowStepDefault = fmtIn === 'CI8' ? ((W>>>0)*(H>>>0)) >>> 0 : ((((W>>>0)*(H>>>0))>>>1) >>> 0);
+    const rowStepBytes = (rowStepBytesOpt && rowStepBytesOpt > 0) ? (rowStepBytesOpt>>>0) : rowStepDefault;
+    for (let r = 0; r < Math.max(1, rowCount|0); r++) {
+      const yk = (y >>> 0) + ((r * ((H >>> 0) + (rowGap >>> 0))) >>> 0);
+      const basePixRel = (pixRelStart >>> 0) + ((r * rowStepBytes) >>> 0);
+      for (let i = 0; i < count; i++) {
+        const pixRel = (basePixRel >>> 0) + ((i * stepBytes) >>> 0);
+        let addrUse = (base + (pixRel >>> 0)) >>> 0;
+        let fmt = fmtIn;
+        if (fmt === 'CI4') {
+          const total = (W >>> 0) * (H >>> 0);
+          const bytesNeeded = (total + 0) >>> 0;
+          const dst = nextScratch >>> 0;
+          nextScratch = (nextScratch + bytesNeeded + 0x10) >>> 0;
+          const palBase = ((pal ?? 0) & 0xF) * 16;
+          for (let j = 0; j < total; j++) {
+            const srcByte = decomp[(pixRel >>> 0) + (j >> 1)] ?? 0;
+            const nib = ((j & 1) === 0) ? ((srcByte >>> 4) & 0xF) : (srcByte & 0xF);
+            const idx = (palBase + nib) & 0xFF;
+            bus.storeU8((dst + j) >>> 0, idx >>> 0);
+          }
+          addrUse = dst >>> 0;
+          fmt = 'CI8';
+        }
+        const xk = (x >>> 0) + ((i * ((W >>> 0) + (gap >>> 0))) >>> 0);
+        if (fmt === 'CI8') cmds.push({ op: 'DrawCI8', w: W>>>0, h: H>>>0, addr: addrUse>>>0, x: xk>>>0, y: yk>>>0 });
+        else cmds.push({ op: 'DrawCI4', w: W>>>0, h: H>>>0, addr: addrUse>>>0, x: xk>>>0, y: yk>>>0 });
+      }
+    }
+    cmds.push({ op: 'End' });
+    writeUcAsRspdl(bus as any, dlAddr>>>0, cmds, strideWords);
+
+    const total = start + interval * frames + 2;
+    const { frames: imgs } = scheduleRSPDLFramesAndRun(
+      cpu, bus, sys, fbOrigin, width, height,
+      dlAddr>>>0, frames, start, interval, total, spOffset, strideWords,
+    );
+    const outImg = (imgs && imgs.length > 0) ? imgs[0]! : viScanout(bus, width, height);
+    await (async () => {
+      const dir = path.resolve(outDir); if (!(fs as any).existsSync(dir)) (fs as any).mkdirSync(dir, { recursive: true });
+      const fname = `${tag}.png`;
+      await maybeWriteImage(outImg, width, height, path.join(dir, fname));
+    })();
+  }
+  if (sweep) {
+    const tlutCandidates = [0x000, 0x200, 0x400, 0x800];
+    const neighborSteps = [-0x40, -0x20, 0x00, 0x20, 0x40];
+    const basePixRelCI8 = (t: number) => [t + 0x200, t + 0x400, t + 0x800, t + 0x1000];
+    const pixCandidatesFrom = (t: number): number[] => {
+      const out: number[] = [];
+      const seen = new Set<number>();
+      for (const b of basePixRelCI8(t)) for (const d of neighborSteps) {
+        const v = (b + d) >>> 0;
+        if (!seen.has(v)) { seen.add(v); out.push(v); }
+      }
+      return out;
+    };
+    const sizes = [ [64,32], [64,64], [128,32], [32,32], [32,64], [64,16], [128,64] ] as Array<[number,number]>;
+    for (const t of tlutCandidates) {
+      const pixCands = pixCandidatesFrom(t);
+      for (const [W,H] of sizes) {
+        for (const pRel of pixCands) {
+          const tag = `off_${off.toString(16)}_ci8_w${W}_h${H}_tlut${t.toString(16)}_pix${pRel.toString(16)}`;
+          await execOne(tag, 'CI8', t, pRel, W, H);
+        }
+      }
+    }
+    // Also try CI4 with a few palettes (0..3), with neighbor steps
+    const palList = [0, 1, 2, 3];
+    const tlutC4 = [0x000, 0x040, 0x080, 0x100]; // 16*2 bytes per palette is 32 bytes
+    const basePixRelCI4 = (t: number) => [t + 0x040, t + 0x080, t + 0x100, t + 0x200];
+    const pixCandsCI4 = (t: number): number[] => {
+      const out: number[] = [];
+      const seen = new Set<number>();
+      for (const b of basePixRelCI4(t)) for (const d of neighborSteps) {
+        const v = (b + d) >>> 0;
+        if (!seen.has(v)) { seen.add(v); out.push(v); }
+      }
+      return out;
+    };
+    for (const t of tlutC4) {
+      const pixCands = pixCandsCI4(t);
+      for (const [W,H] of sizes) {
+        for (const pRel of pixCands) for (const pal of palList) {
+          const tag = `off_${off.toString(16)}_ci4_pal${pal}_w${W}_h${H}_tlut${t.toString(16)}_pix${pRel.toString(16)}`;
+          await execOne(tag, 'CI4', t, pRel, W, H, pal);
+        }
+      }
+    }
+  } else if (stitch) {
+    const fmt: 'CI8'|'CI4' = (format === 'ci4') ? 'CI4' : 'CI8';
+    const tag = `off_${off.toString(16)}_${fmt.toLowerCase()}_stitch${stitchCount}x${stitchRows}_gap${stitchGap}_${stitchRowGap}_w${tileW}_h${tileH}_tlut${tlutOff.toString(16)}_pix${pixOff.toString(16)}` + (fmt==='CI4'?`_pal${palIdx}`:'') + (stitchStepBytes?`_step${stitchStepBytes.toString(16)}`:'') + (stitchStepRowBytes?`_rstep${stitchStepRowBytes.toString(16)}`:'');
+    await execStitch(tag, fmt, tlutOff, pixOff, tileW, tileH, palIdx, stitchCount, stitchGap, stitchStepBytes, stitchRows, stitchRowGap, stitchStepRowBytes);
+  } else {
+    const fmt: 'CI8'|'CI4' = (format === 'ci4') ? 'CI4' : 'CI8';
+    const tag = `off_${off.toString(16)}_${fmt.toLowerCase()}_w${tileW}_h${tileH}_tlut${tlutOff.toString(16)}_pix${pixOff.toString(16)}` + (fmt==='CI4'?`_pal${palIdx}`:'');
+    await execOne(tag, fmt, tlutOff, pixOff, tileW, tileH, palIdx);
+  }
+
+  console.log(JSON.stringify({ command: 'rom-probe-mio0', rom: file, off: `0x${off.toString(16)}`, outDir, sweep: !!sweep, width, height }, null, 2));
+}
 
 async function runSm64Demo(args: string[]) {
   const opts: Record<string, string> = {};
@@ -859,6 +1284,7 @@ async function runRomBootRun(args: string[]) {
   const discoverNoPrestage = Object.prototype.hasOwnProperty.call(opts, 'discover-no-prestage') || Object.prototype.hasOwnProperty.call(opts, 'discover_noprestage') || Object.prototype.hasOwnProperty.call(opts, 'discoverNoPrestage');
   const bootPath = opts['boot'];
   const bootOut = opts['boot-out'];
+  const discoverOut = opts['discover-out'] ? String(opts['discover-out']) : undefined;
   const iplHle = Object.prototype.hasOwnProperty.call(opts, 'ipl-hle');
   const bridge = Object.prototype.hasOwnProperty.call(opts, 'bridge');
   const bridgeTest = Object.prototype.hasOwnProperty.call(opts, 'bridge-test');
@@ -905,6 +1331,11 @@ async function runRomBootRun(args: string[]) {
   const allowEvent = (t: string) => (!eventsSlim || t === 'pi' || t === 'si' || t === 'sp' || t === 'dp');
   // PI STATUS trace toggle: off by default to avoid massive spam; enable with --trace-pi-status
   const tracePiStatus = Object.prototype.hasOwnProperty.call(opts, 'trace-pi-status') || Object.prototype.hasOwnProperty.call(opts, 'tracePiStatus') || Object.prototype.hasOwnProperty.call(opts, 'trace_pi_status');
+  // Timing profile and trace options (for cycle-aware progress)
+  const timingProfile = String(opts['timing-profile'] || opts['timingProfile'] || 'dev').toLowerCase();
+  const traceTimingOpt = opts['trace-timing'] || opts['traceTiming'] || '';
+  const traceTimingEnabled = Object.prototype.hasOwnProperty.call(opts, 'trace-timing') || Object.prototype.hasOwnProperty.call(opts, 'traceTiming');
+  const traceTimingPath = traceTimingEnabled && traceTimingOpt && traceTimingOpt !== '1' ? String(traceTimingOpt) : '';
   // Optional PI kick DMA injection (for diagnostics)
   const kickPiCart = opts['kick-pi-cart'] ? parseNum(opts['kick-pi-cart'], 0) >>> 0 : null;
   const kickPiDram = opts['kick-pi-dram'] ? parseNum(opts['kick-pi-dram'], 0) >>> 0 : null;
@@ -934,6 +1365,29 @@ async function runRomBootRun(args: string[]) {
   const bus = new Bus(rdram);
   const cpu = new CPU(bus);
   const sys = new System(cpu, bus);
+
+  // Compact timing trace (CSV-like) and simple PI latency profiles
+  const timingLines: string[] = [];
+  function emitTiming(evt: string, dev: string, fields?: Record<string, number | string>) {
+    if (!traceTimingEnabled) return;
+    if (timingLines.length === 0) timingLines.push('cycle,device,event,details');
+    const parts: string[] = [];
+    if (fields) {
+      for (const [k, v] of Object.entries(fields)) {
+        if (typeof v === 'number') parts.push(`${k}=0x${(((v as number) >>> 0) >>> 0).toString(16)}`);
+        else parts.push(`${k}=${String(v)}`);
+      }
+    }
+    timingLines.push(`${sys.cycle >>> 0},${dev},${evt},${parts.join(';')}`);
+  }
+  function piLatencyCycles(len: number): number {
+    const L = (len >>> 0);
+    switch (timingProfile) {
+      case 'fast': return 16;
+      case 'realistic': return Math.max(80, Math.floor(80 + L * 0.5));
+      default: return 64;
+    }
+  }
   const trace: { pc: string, instr: string }[] = [];
   const events: any[] = [];
   const cpuWarnings: { pc: string; instr: string; kind: string; details?: Record<string, any> }[] = [];
@@ -957,6 +1411,71 @@ async function runRomBootRun(args: string[]) {
 
   // HLE boot sets PC from header and makes ROM available to PI
   // Use PIF/IPL3 HLE boot so the ROM's own boot code runs from 0xA4000040
+  // Optional SRAM load/persist configuration
+  const sramFile = opts['sram-file'] ? String(opts['sram-file']) : undefined;
+  // support alias --sram-autosave as well
+  const sramAutosave = Object.prototype.hasOwnProperty.call(opts, 'sram-save-on-exit') || Object.prototype.hasOwnProperty.call(opts, 'sram-autosave');
+  const sramSizeOpt = opts['sram-size'] ? parseNum(opts['sram-size'], 0) >>> 0 : 0;
+  let sramMem: Uint8Array | null = null;
+  if (sramFile) {
+    try {
+      const exists = (fs as any).existsSync(sramFile);
+      let size = 0x8000 >>> 0; // default 32 KiB
+      if (exists) {
+        const stat = (fs as any).statSync(sramFile);
+        const fileSize = Number(stat.size) >>> 0;
+        size = (sramSizeOpt && sramSizeOpt > 0) ? sramSizeOpt : (fileSize > 0 ? fileSize >>> 0 : size);
+      } else {
+        if (sramSizeOpt && sramSizeOpt > 0) size = sramSizeOpt >>> 0;
+      }
+      sramMem = new Uint8Array(size >>> 0);
+      sramMem.fill(0);
+      if (exists) {
+        try {
+          const data = (fs as any).readFileSync(sramFile) as Buffer;
+          const n = Math.min(sramMem.length, data.length);
+          sramMem.set(new Uint8Array(data.buffer, data.byteOffset, n), 0);
+        } catch {}
+      }
+      bus.setSRAM(sramMem);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('[sram] failed to initialize SRAM from file:', e);
+    }
+  }
+
+  // Optional FlashRAM load/persist configuration
+  const flashFile = opts['flash-file'] ? String(opts['flash-file']) : undefined;
+  const flashAutosave = Object.prototype.hasOwnProperty.call(opts, 'flash-save-on-exit') || Object.prototype.hasOwnProperty.call(opts, 'flash-autosave');
+  const flashSizeOpt = opts['flash-size'] ? parseNum(opts['flash-size'], 0) >>> 0 : 0;
+  let flashMem: Uint8Array | null = null;
+  if (flashFile) {
+    try {
+      const exists = (fs as any).existsSync(flashFile);
+      let size = 0x20000 >>> 0; // default 128 KiB (1 Mbit)
+      if (exists) {
+        const stat = (fs as any).statSync(flashFile);
+        const fileSize = Number(stat.size) >>> 0;
+        size = (flashSizeOpt && flashSizeOpt > 0) ? flashSizeOpt : (fileSize > 0 ? fileSize >>> 0 : size);
+      } else {
+        if (flashSizeOpt && flashSizeOpt > 0) size = flashSizeOpt >>> 0;
+      }
+      flashMem = new Uint8Array(size >>> 0);
+      flashMem.fill(0);
+      if (exists) {
+        try {
+          const data = (fs as any).readFileSync(flashFile) as Buffer;
+          const n = Math.min(flashMem.length, data.length);
+          flashMem.set(new Uint8Array(data.buffer, data.byteOffset, n), 0);
+        } catch {}
+      }
+      bus.setFlashRAM(flashMem);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('[flash] failed to initialize FlashRAM from file:', e);
+    }
+  }
+
   const { hlePifBoot, hlePiLoadSegments } = await import('@n64/core');
   const boot = hlePifBoot(cpu, bus, new Uint8Array(rom));
 
@@ -1187,6 +1706,7 @@ async function runRomBootRun(args: string[]) {
       // SP_MEM_ADDR (also used as START when value==1 in our stub)
       if (v === 1) {
         spStarts++;
+        emitTiming('sp_start', 'sp', { memAddr: spMemAddr >>> 0 });
         const dmemSlice = (bus.sp as any).dmem as Uint8Array;
         let task: any | undefined = undefined;
         try {
@@ -1244,6 +1764,7 @@ async function runRomBootRun(args: string[]) {
       // When writing bit0=1, HALT is cleared -> start
       if ((v & 0x1) !== 0) {
         spStarts++;
+        emitTiming('sp_start', 'sp', { memAddr: spMemAddr >>> 0 });
         // Snapshot a small view of DMEM at start
         const dmemSlice = (bus.sp as any).dmem as Uint8Array;
         // Try to parse a plausible OSTask struct at DMEM[0..63]
@@ -1297,25 +1818,29 @@ async function runRomBootRun(args: string[]) {
     if (offU === 0x00) { lastPiDram = valU >>> 0; if (traceBoot>0 && monitorActive && allowEvent('pi')) events.push({ type:'pi', reg:'DRAM_ADDR', val:`0x${valU.toString(16)}`, cyc: sys.cycle }); }
     if (offU === 0x04) { lastPiCart = valU >>> 0; if (traceBoot>0 && monitorActive && allowEvent('pi')) events.push({ type:'pi', reg:'CART_ADDR', val:`0x${valU.toString(16)}`, cyc: sys.cycle }); }
     if (offU === 0x08) { // PI_RD_LEN
+      const len = (((valU & 0x00ffffff) >>> 0) + 1) >>> 0;
       if (monitorActive) {
         piReads++;
-        const len = ((valU & 0x00ffffff) >>> 0) + 1;
         piLoads.push({ cartAddr: lastPiCart >>> 0, dramAddr: lastPiDram >>> 0, length: len >>> 0 });
         if (traceBoot>0 && allowEvent('pi')) events.push({ type:'pi', reg:'RD_LEN', val:`0x${valU.toString(16)}`, cart:`0x${lastPiCart.toString(16)}`, dram:`0x${lastPiDram.toString(16)}`, len:`0x${len.toString(16)}`, cyc: sys.cycle });
       }
-      // Schedule a short-latency DMA completion so ROM doesn't stall on IO busy/interrupts.
-      const when = (sys.cycle + 64) >>> 0;
+      const latency = piLatencyCycles(len >>> 0) >>> 0;
+      emitTiming('pi_rd_len', 'pi', { cart: lastPiCart >>> 0, dram: lastPiDram >>> 0, len: len >>> 0, latency: latency >>> 0 });
+      const when = (sys.cycle + latency) >>> 0;
       sys.scheduleAt(when, () => {
         bus.pi.completeDMA();
-        if (traceBoot>0 && monitorActive && allowEvent('pi')) events.push({ type:'pi', reg:'AUTO_COMPLETE_DMA', cart:`0x${lastPiCart.toString(16)}`, dram:`0x${lastPiDram.toString(16)}`, len:`0x${(((valU & 0x00ffffff)>>>0)+1).toString(16)}`, cyc: sys.cycle });
+        emitTiming('pi_dma_complete', 'pi', { len: len >>> 0 });
+        if (traceBoot>0 && monitorActive && allowEvent('pi')) events.push({ type:'pi', reg:'AUTO_COMPLETE_DMA', cart:`0x${lastPiCart.toString(16)}`, dram:`0x${lastPiDram.toString(16)}`, len:`0x${(len>>>0).toString(16)}`, cyc: sys.cycle });
       });
     }
     if (offU === 0x0C) { // PI_WR_LEN
-      // Mirror behavior: schedule completion
-      const len = ((valU & 0x00ffffff) >>> 0) + 1;
-      const when = (sys.cycle + 64) >>> 0;
+      const len = (((valU & 0x00ffffff) >>> 0) + 1) >>> 0;
+      const latency = piLatencyCycles(len >>> 0) >>> 0;
+      emitTiming('pi_wr_len', 'pi', { cart: lastPiCart >>> 0, dram: lastPiDram >>> 0, len: len >>> 0, latency: latency >>> 0 });
+      const when = (sys.cycle + latency) >>> 0;
       sys.scheduleAt(when, () => {
         bus.pi.completeDMA();
+        emitTiming('pi_dma_complete_wr', 'pi', { len: len >>> 0 });
         if (traceBoot>0 && monitorActive && allowEvent('pi')) events.push({ type:'pi', reg:'AUTO_COMPLETE_DMA_WR', cart:`0x${lastPiCart.toString(16)}`, dram:`0x${lastPiDram.toString(16)}`, len:`0x${len.toString(16)}`, cyc: sys.cycle });
       });
       if (traceBoot>0 && monitorActive) events.push({ type:'pi', reg:'WR_LEN', val:`0x${valU.toString(16)}`, cart:`0x${lastPiCart.toString(16)}`, dram:`0x${lastPiDram.toString(16)}`, len:`0x${len.toString(16)}`, cyc: sys.cycle });
@@ -1656,6 +2181,7 @@ async function runRomBootRun(args: string[]) {
   if (!fastbootHle && !noViVblank) {
     sys.scheduleEvery(viInterval >>> 0, viInterval >>> 0, Math.max(1, Math.floor(cycles / Math.max(1, viInterval))), () => {
       bus.vi.vblank();
+      emitTiming('vi_vblank', 'vi', { origin: viOrigin >>> 0, width: viWidth >>> 0 });
       if (snapshot && viOrigin !== 0 && viWidth !== 0) {
         const img = viScanout(bus, width, height);
         frames.push(img);
@@ -1895,6 +2421,35 @@ async function runRomBootRun(args: string[]) {
     }
   }
 
+  // Save SRAM if requested
+  if (sramAutosave && sramFile && sramMem) {
+    try {
+      const pathMod = await import('node:path');
+      const dir = pathMod.dirname(sramFile);
+      if (!(fs as any).existsSync(dir)) (fs as any).mkdirSync(dir, { recursive: true });
+      (fs as any).writeFileSync(sramFile, Buffer.from(sramMem));
+      // eslint-disable-next-line no-console
+      console.log(`[sram] saved ${sramFile} (${sramMem.length} bytes)`);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('[sram] failed to save SRAM file:', e);
+    }
+  }
+  // Save Flash if requested
+  if (flashAutosave && flashFile && flashMem) {
+    try {
+      const pathMod = await import('node:path');
+      const dir = pathMod.dirname(flashFile);
+      if (!(fs as any).existsSync(dir)) (fs as any).mkdirSync(dir, { recursive: true });
+      (fs as any).writeFileSync(flashFile, Buffer.from(flashMem));
+      // eslint-disable-next-line no-console
+      console.log(`[flash] saved ${flashFile} (${flashMem.length} bytes)`);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('[flash] failed to save FlashRAM file:', e);
+    }
+  }
+
   // Optionally write discovered PI loads to file
   if (discover && bootOut) {
     try {
@@ -1907,6 +2462,131 @@ async function runRomBootRun(args: string[]) {
       // eslint-disable-next-line no-console
       console.error('Failed to write --boot-out file:', e);
     }
+  }
+
+  // Optionally write full discovery config (PI loads + per-frame DLs) to file
+  if (discover && discoverOut) {
+    try {
+      const pathMod = await import('node:path');
+      const fsMod = await import('node:fs');
+      const toHex = (n: number) => `0x${((n>>>0)>>>0).toString(16)}`;
+      // Deduplicate PI loads
+      const seen = new Set<string>();
+      const piLoadsUniq = piLoads.filter(s => { const k = `${s.cartAddr>>>0}:${s.dramAddr>>>0}:${s.length>>>0}`; if (seen.has(k)) return false; seen.add(k); return true; });
+      // Extract per-frame dlWords by reading memory at data_ptr until G_ENDDL
+      const framesOut: { dlAddr?: string; dlWords?: string[] }[] = [];
+      const readU32 = (pa: number) => be32(bus.rdram.bytes as any, pa >>> 0) >>> 0;
+      const pushFrameFromPtr = (ptr: number) => {
+        const words: string[] = [];
+        let p = ptr >>> 0;
+        const maxWords = 4096; // safety cap (pairs -> up to 2048 commands)
+        for (let i = 0; i < maxWords; i += 2) {
+          if ((p + 8) > bus.rdram.bytes.length) break;
+          const w0 = readU32(p); const w1 = readU32((p + 4) >>> 0);
+          words.push(toHex(w0), toHex(w1));
+          p = (p + 8) >>> 0;
+          if (((w0 >>> 24) & 0xFF) === 0xDF) break; // G_ENDDL
+        }
+        if (words.length) framesOut.push({ dlWords: words });
+      };
+      for (const t of ostasks) {
+        const dpStr: string | undefined = (t as any)?.task?.data_ptr;
+        if (dpStr && /^0x[0-9a-fA-F]+$/.test(dpStr)) {
+          const ptr = parseInt(dpStr, 16) >>> 0;
+          if (ptr !== 0 && ptr < (bus.rdram.bytes.length - 8)) pushFrameFromPtr(ptr);
+          else framesOut.push({ dlAddr: dpStr });
+        }
+      }
+      // Parse assets (TLUTs and CI8 textures) from DL words
+      type TLUT = { addr: number; count: number };
+      type Blob = { addr: number; len: number };
+      const tlutMap = new Map<number, TLUT>();
+      const blobMap = new Map<number, Blob>();
+      for (const f of framesOut) {
+        const words = (f.dlWords || []).map(w => (typeof w === 'string' ? parseNum(String(w), 0) >>> 0 : (Number(w) >>> 0))) as number[];
+        let lastW = 0; let lastH = 0; let lastFormatCI8 = false;
+        let lastPixAddr: number | null = null;
+        const maybeRecordBlob = () => {
+          if (lastFormatCI8 && lastPixAddr !== null && lastW > 0 && lastH > 0) {
+            const pixAddr = lastPixAddr >>> 0;
+            const len = (lastW * lastH) >>> 0;
+            if (pixAddr + len <= bus.rdram.bytes.length) {
+              blobMap.set(pixAddr >>> 0, { addr: pixAddr>>>0, len: len>>>0 });
+            }
+          }
+        };
+        for (let i = 0; i + 1 < words.length; i += 2) {
+          const w0 = (words[i]!) >>> 0; const w1 = (words[i + 1]!) >>> 0;
+          const op = (w0 >>> 24) & 0xFF;
+          if (op === 0xF0) { // LOADTLUT: w0 low16=count, w1=addr
+            const count = (w0 & 0xFFFF) >>> 0; const addr = w1 >>> 0;
+            if (count > 0 && addr < bus.rdram.bytes.length) tlutMap.set(addr >>> 0, { addr: addr>>>0, count: count>>>0 });
+          } else if (op === 0xFD) { // SETTIMG: siz in bit19, w1=pixAddr
+            const sizCI8 = ((w0 >>> 19) & 0x1) === 1; lastFormatCI8 = sizCI8;
+            lastPixAddr = w1 >>> 0;
+            // If we already know dimensions, record now
+            maybeRecordBlob();
+          } else if (op === 0xF2) { // SETTILESIZE: w1 packs (w-1,h-1) in 10.2 fixed
+            const xhi = ((w1 >>> 12) & 0xFFF) >>> 0; const yhi = (w1 & 0xFFF) >>> 0;
+            const wPx = ((xhi >>> 2) + 1) >>> 0; const hPx = ((yhi >>> 2) + 1) >>> 0;
+            lastW = wPx; lastH = hPx;
+            // If we already have a SETTIMG, record now
+            maybeRecordBlob();
+          }
+        }
+      }
+      const tlutsOut: { addr: string; entries: string[] }[] = [];
+      for (const { addr, count } of tlutMap.values()) {
+        const entries: string[] = [];
+        const maxEntries = Math.min(256, count >>> 0);
+        const bytes: Uint8Array = (bus.rdram.bytes as unknown as Uint8Array);
+        for (let i = 0; i < maxEntries; i++) {
+          const off = (addr + i * 2) >>> 0;
+          if ((off + 2) > bytes.length) break;
+          const lo = bytes[off + 1]! >>> 0; // BE16
+          const hi = bytes[off]! >>> 0;
+          const v = ((hi << 8) | lo) >>> 0;
+          entries.push(`0x${v.toString(16)}`);
+        }
+        tlutsOut.push({ addr: toHex(addr), entries });
+      }
+      const blobsOut: { addr: string; dataHex: string }[] = [];
+      for (const { addr, len } of blobMap.values()) {
+        const arr = bus.rdram.bytes.subarray(addr, addr + len);
+        const hex = Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
+        blobsOut.push({ addr: toHex(addr), dataHex: hex });
+      }
+      const cfgOut = {
+        video: { width: toHex(width>>>0), height: toHex(height>>>0), origin: toHex((viOrigin !== 0 ? viOrigin : 0xF000) >>> 0) },
+        timing: { start: 2, interval: 3, frames: framesOut.length, spOffset: 1 },
+        f3dex: { strideWords: 256, bgStart: '0x001F', bgEnd: '0x07FF' },
+        piLoads: piLoadsUniq.map(s => ({ cartAddr: toHex(s.cartAddr), dramAddr: toHex(s.dramAddr), length: toHex(s.length) })),
+        tluts: tlutsOut.length ? tlutsOut : undefined,
+        blobs: blobsOut.length ? blobsOut : undefined,
+        frames: framesOut,
+      } as any;
+      await fsMod.promises.mkdir(pathMod.dirname(discoverOut), { recursive: true });
+      await fsMod.promises.writeFile(discoverOut, JSON.stringify(cfgOut, null, 2), 'utf8');
+      // eslint-disable-next-line no-console
+      console.log(`[discover] wrote full config to ${discoverOut} (frames=${framesOut.length}, piLoads=${piLoadsUniq.length})`);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('Failed to write --discover-out file:', e);
+    }
+  }
+
+  // Flush timing trace if requested
+  let timingOut: any = undefined;
+  if (traceTimingEnabled) {
+    try {
+      if (traceTimingPath) {
+        const pathMod = await import('node:path');
+        const dir = pathMod.dirname(traceTimingPath);
+        if (!(fs as any).existsSync(dir)) (fs as any).mkdirSync(dir, { recursive: true });
+        (fs as any).writeFileSync(traceTimingPath, timingLines.join('\n') + (timingLines.length ? '\n' : ''), 'utf8');
+      }
+    } catch {}
+    timingOut = { profile: timingProfile, path: traceTimingPath || null, lines: traceTimingPath ? undefined : timingLines };
   }
 
   console.log(JSON.stringify({
@@ -1936,6 +2616,7 @@ async function runRomBootRun(args: string[]) {
     pokes: appliedPokes.length ? appliedPokes : undefined,
     scheduledPokes: scheduledPokes.length ? scheduledPokes : undefined,
     dumpAfter: dumpAfter && dumpAfter.length ? dumpAfter : undefined,
+    timing: timingOut,
   }, null, 2));
 }
 
@@ -1980,6 +2661,18 @@ async function main() {
   }
   if (cmd === 'rom-boot-run') {
     await runRomBootRun(argv.slice(1));
+    return;
+  }
+  if (cmd === 'rom-scan-mio0') {
+    await runRomScanMio0(argv.slice(1));
+    return;
+  }
+  if (cmd === 'rom-probe-mio0') {
+    await runRomProbeMio0(argv.slice(1));
+    return;
+  }
+  if (cmd === 'curate-images') {
+    await runCurateImages(argv.slice(1));
     return;
   }
   printUsage();

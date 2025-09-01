@@ -15,8 +15,9 @@ export class CPU {
   // Minimal COP1 (FPU) register file stub
   readonly fpr = new Uint32Array(32);
   fcr31 = 0 >>> 0; // control/status; bit 23 = condition flag
-  hi = 0 >>> 0;
-  lo = 0 >>> 0;
+  // 64-bit HI/LO registers (each split into hi32/lo32)
+  private hiHi = 0 >>> 0; private hiLo = 0 >>> 0;
+  private loHi = 0 >>> 0; private loLo = 0 >>> 0;
   pc = 0 >>> 0;
   inDelaySlot = false;
 
@@ -84,8 +85,8 @@ export class CPU {
   reset(): void {
     this.regs.fill(0);
     this.regsHi.fill(0);
-    this.hi = 0;
-    this.lo = 0;
+    this.hiHi = 0; this.hiLo = 0;
+    this.loHi = 0; this.loLo = 0;
     this.pc = 0; // HLE boot will set this appropriately later
     this.branchPending = false;
     this.branchCommitPending = false;
@@ -583,61 +584,102 @@ export class CPU {
             this.setReg(rd, isLt ? 1 : 0);
             return;
           }
-          case 0x10: { // MFHI rd
-            this.setReg(rd, this.hi);
+          case 0x10: { // MFHI rd (move full 64-bit HI into GPR)
+            this.setReg64(rd, this.hiHi >>> 0, this.hiLo >>> 0);
             return;
           }
-          case 0x12: { // MFLO rd
-            this.setReg(rd, this.lo);
+          case 0x12: { // MFLO rd (move full 64-bit LO into GPR)
+            this.setReg64(rd, this.loHi >>> 0, this.loLo >>> 0);
             return;
           }
-          case 0x11: { // MTHI rs
-            this.hi = this.getReg(rs);
+          case 0x11: { // MTHI rs (move full 64-bit GPR into HI)
+            this.hiHi = this.getRegHi(rs) >>> 0;
+            this.hiLo = this.getReg(rs) >>> 0;
             return;
           }
-          case 0x13: { // MTLO rs
-            this.lo = this.getReg(rs);
+          case 0x13: { // MTLO rs (move full 64-bit GPR into LO)
+            this.loHi = this.getRegHi(rs) >>> 0;
+            this.loLo = this.getReg(rs) >>> 0;
             return;
           }
-          case 0x18: { // MULT rs, rt (signed)
+          case 0x18: { // MULT rs, rt (signed 32x32 -> 64; sign-extend into 64-bit HI/LO)
             const { hi, lo } = mul64Signed(this.getReg(rs), this.getReg(rt));
-            this.hi = hi; this.lo = lo;
+            this.loLo = lo >>> 0;
+            this.loHi = ((lo >>> 31) !== 0) ? 0xFFFFFFFF : 0x00000000;
+            this.hiLo = hi >>> 0;
+            this.hiHi = ((hi >>> 31) !== 0) ? 0xFFFFFFFF : 0x00000000;
             return;
           }
-          case 0x19: { // MULTU rs, rt (unsigned)
+          case 0x19: { // MULTU rs, rt (unsigned 32x32 -> 64; zero-extend into 64-bit HI/LO)
             const { hi, lo } = mul64Unsigned(this.getReg(rs), this.getReg(rt));
-            this.hi = hi; this.lo = lo;
+            this.loLo = lo >>> 0; this.loHi = 0 >>> 0;
+            this.hiLo = hi >>> 0; this.hiHi = 0 >>> 0;
             return;
           }
-          case 0x1a: { // DIV rs, rt (signed)
+          case 0x1a: { // DIV rs, rt (signed 32-bit)
             const { q, r } = div32Signed(this.getReg(rs), this.getReg(rt));
-            this.lo = q; this.hi = r;
+            // Sign-extend 32-bit q,r into 64-bit LO/HI
+            this.loLo = q >>> 0; this.loHi = ((q >>> 31) !== 0) ? 0xFFFFFFFF : 0x00000000;
+            this.hiLo = r >>> 0; this.hiHi = ((r >>> 31) !== 0) ? 0xFFFFFFFF : 0x00000000;
             return;
           }
-          case 0x1b: { // DIVU rs, rt (unsigned)
+          case 0x1b: { // DIVU rs, rt (unsigned 32-bit)
             const { q, r } = div32Unsigned(this.getReg(rs), this.getReg(rt));
-            this.lo = q; this.hi = r;
+            this.loLo = q >>> 0; this.loHi = 0 >>> 0;
+            this.hiLo = r >>> 0; this.hiHi = 0 >>> 0;
             return;
           }
           // 64-bit mult/div group (DMULT/DMULTU/DDIV/DDIVU) - modeled via 32-bit args
-          case 0x1c: { // DMULT rs, rt (signed 64x64 -> 128, modeled from 32-bit inputs)
-            const { hi, lo } = mul64Signed(this.getReg(rs), this.getReg(rt));
-            this.hi = hi; this.lo = lo;
+          case 0x1c: { // DMULT rs, rt (signed 64x64 -> 128)
+            const aHi = this.getRegHi(rs) >>> 0, aLo = this.getReg(rs) >>> 0;
+            const bHi = this.getRegHi(rt) >>> 0, bLo = this.getReg(rt) >>> 0;
+            const A = CPU.toBigIntSigned(aHi, aLo);
+            const B = CPU.toBigIntSigned(bHi, bLo);
+            const P = A * B; // 128-bit
+            const lo64 = CPU.partsFromBigIntUnsigned(P);
+            const hi64 = CPU.partsFromBigIntUnsigned(P >> 64n);
+            this.loHi = lo64.hi; this.loLo = lo64.lo;
+            this.hiHi = hi64.hi; this.hiLo = hi64.lo;
             return;
           }
-          case 0x1d: { // DMULTU rs, rt (unsigned)
-            const { hi, lo } = mul64Unsigned(this.getReg(rs), this.getReg(rt));
-            this.hi = hi; this.lo = lo;
+          case 0x1d: { // DMULTU rs, rt (unsigned 64x64 -> 128)
+            const aHi = this.getRegHi(rs) >>> 0, aLo = this.getReg(rs) >>> 0;
+            const bHi = this.getRegHi(rt) >>> 0, bLo = this.getReg(rt) >>> 0;
+            const A = CPU.toBigIntUnsigned(aHi, aLo);
+            const B = CPU.toBigIntUnsigned(bHi, bLo);
+            const P = A * B;
+            const lo64 = CPU.partsFromBigIntUnsigned(P);
+            const hi64 = CPU.partsFromBigIntUnsigned(P >> 64n);
+            this.loHi = lo64.hi; this.loLo = lo64.lo;
+            this.hiHi = hi64.hi; this.hiLo = hi64.lo;
             return;
           }
-          case 0x1e: { // DDIV rs, rt (signed) - modeled from 32-bit inputs
-            const { q, r } = div32Signed(this.getReg(rs), this.getReg(rt));
-            this.lo = q; this.hi = r;
+          case 0x1e: { // DDIV rs, rt (signed)
+            const aHi = this.getRegHi(rs) >>> 0, aLo = this.getReg(rs) >>> 0;
+            const bHi = this.getRegHi(rt) >>> 0, bLo = this.getReg(rt) >>> 0;
+            const A = CPU.toBigIntSigned(aHi, aLo);
+            const B = CPU.toBigIntSigned(bHi, bLo);
+            let q: bigint, r: bigint;
+            if (B === 0n) { q = -1n; r = A; }
+            else { q = A / B; r = A % B; }
+            const q64 = CPU.partsFromBigIntUnsigned(q);
+            const r64 = CPU.partsFromBigIntUnsigned(r);
+            this.loHi = q64.hi; this.loLo = q64.lo;
+            this.hiHi = r64.hi; this.hiLo = r64.lo;
             return;
           }
           case 0x1f: { // DDIVU rs, rt (unsigned)
-            const { q, r } = div32Unsigned(this.getReg(rs), this.getReg(rt));
-            this.lo = q; this.hi = r;
+            const aHi = this.getRegHi(rs) >>> 0, aLo = this.getReg(rs) >>> 0;
+            const bHi = this.getRegHi(rt) >>> 0, bLo = this.getReg(rt) >>> 0;
+            const A = CPU.toBigIntUnsigned(aHi, aLo);
+            const B = CPU.toBigIntUnsigned(bHi, bLo);
+            let q: bigint, r: bigint;
+            if (B === 0n) { q = (1n << 64n) - 1n; r = A; }
+            else { q = A / B; r = A % B; }
+            const q64 = CPU.partsFromBigIntUnsigned(q);
+            const r64 = CPU.partsFromBigIntUnsigned(r);
+            this.loHi = q64.hi; this.loLo = q64.lo;
+            this.hiHi = r64.hi; this.hiLo = r64.lo;
             return;
           }
           case 0x0c: { // SYSCALL
@@ -1689,6 +1731,23 @@ export class CPU {
     } else {
       if (this.llAddr === a4) this.llValid = false;
     }
+  }
+
+  // 64-bit helpers for DMULT/DDIV etc.
+  private static toBigIntUnsigned(hi: number, lo: number): bigint {
+    return ((BigInt(hi >>> 0) << 32n) | BigInt(lo >>> 0)) & ((1n << 64n) - 1n);
+  }
+  private static toBigIntSigned(hi: number, lo: number): bigint {
+    let u = CPU.toBigIntUnsigned(hi, lo);
+    if ((hi >>> 31) & 1) u -= (1n << 64n);
+    return u;
+  }
+  private static partsFromBigIntUnsigned(x: bigint): { hi: number; lo: number } {
+    const m64 = (1n << 64n) - 1n;
+    const v = x & m64;
+    const lo = Number(v & 0xffffffffn) >>> 0;
+    const hi = Number((v >> 32n) & 0xffffffffn) >>> 0;
+    return { hi, lo };
   }
 
   // Emit a one-shot decode warning by unique key

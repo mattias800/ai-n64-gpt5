@@ -1,5 +1,5 @@
 import { readU16BE, readU32BE, writeU16BE, writeU32BE } from '../utils/bit.js';
-import { AI, AI_BASE, AI_SIZE, DP, DP_BASE, DP_SIZE, MI, MI_BASE, MI_SIZE, PI, PI_BASE, PI_SIZE, SI, SI_BASE, SI_SIZE, SP, SP_BASE, SP_SIZE, VI, VI_BASE, VI_SIZE, RI, RI_BASE, RI_SIZE } from '../devices/mmio.js';
+import { AI, AI_BASE, AI_SIZE, DP, DP_BASE, DP_SIZE, MI, MI_BASE, MI_SIZE, PI, PI_BASE, PI_SIZE, SI, SI_BASE, SI_SIZE, SP, SP_BASE, SP_SIZE, VI, VI_BASE, VI_SIZE, RI, RI_BASE, RI_SIZE, FlashRAM } from '../devices/mmio.js';
 
 export class RDRAM {
   readonly bytes: Uint8Array;
@@ -72,6 +72,14 @@ export class Bus {
   setROM(rom: Uint8Array): void {
     this.rom = rom;
     this.pi.setROM(rom);
+  }
+
+  setSRAM(bytes: Uint8Array): void {
+    this.pi.setSRAM(bytes);
+  }
+
+  setFlashRAM(bytes: Uint8Array): void {
+    this.pi.setFlashRAM(new FlashRAM(bytes));
   }
 
   private readMMIO(paddr: number): number | null {

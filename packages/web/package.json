@@ -2,12 +2,22 @@
   "name": "@n64/web",
   "version": "0.1.0",
   "type": "module",
+  "private": true,
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "dev": "vite",
+    "build": "tsc -p tsconfig.json && vite build",
+    "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@n64/core": "file:../core"
+  },
+  "bin": {
+    "n64-web": "dist/cli.js"
+  },
+  "devDependencies": {
+    "vite": "^5.3.0",
+    "vite-tsconfig-paths": "^4.3.2"
   }
 }
 

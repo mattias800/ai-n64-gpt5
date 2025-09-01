@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>N64 SM64 Title Demo (Browser)</title>
+    <style>
+      html, body { height: 100%; margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .row { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+      .col { display: flex; flex-direction: column; gap: 8px; }
+      #app { padding: 12px; display: grid; grid-template-columns: 320px 1fr; gap: 16px; }
+      #controls { border-right: 1px solid #ddd; padding-right: 16px; }
+      label { display: flex; flex-direction: column; gap: 4px; }
+      input[type="number"] { width: 120px; }
+      button { padding: 6px 10px; }
+      #canvasWrap { background: #222; display: inline-block; }
+      #log { white-space: pre; background: #f7f7f7; padding: 8px; border: 1px solid #ddd; border-radius: 6px; max-height: 280px; overflow: auto; }
+      small.hint { color: #666; }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div id="controls" class="col">
+        <div class="col">
+          <label>
+            ROM file (.z64/.n64/.v64)
+            <input id="romFile" type="file" accept=".z64,.n64,.v64,application/octet-stream" />
+          </label>
+          <label>
+            Config JSON (optional; defaults to sample)
+            <input id="cfgFile" type="file" accept=".json,application/json" />
+          </label>
+        </div>
+        <div class="row">
+          <label>
+            Frames
+            <input id="frames" type="number" min="1" max="8" value="2" />
+          </label>
+        </div>
+        <div class="row">
+          <button id="runBtn">Run</button>
+          <button id="resetBtn">Reset</button>
+        </div>
+        <div class="col">
+          <strong>Log / CRCs</strong>
+          <div id="log"></div>
+          <small class="hint">If no config is selected, the sample at /samples/sm64-rom-title.sample.json is used.</small>
+        </div>
+      </div>
+      <div class="col">
+        <div id="canvasWrap">
+          <canvas id="fb" width="320" height="240"></canvas>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

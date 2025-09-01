@@ -102,6 +102,20 @@ High-level architecture (big picture)
 - Web adapters (packages/web/src):
   - Minimal stubs for GL/Audio adapters; intended for future browser rendering paths.
 
+Web automation (no browser required)
+- Build once: npm run build
+- Quick CRC from the web core runner (fallback sample):
+  npm run web:crc:check
+- Direct CRC with frames override:
+  npm run web:crc -- --frames 2
+- Use your own config and ROM (fails on mismatch if expectedCrc32 present):
+  node packages/web/dist/cli.js sm64-title --config path/to.cfg.json --rom /abs/path/SM64.z64
+- Update a config’s expectedCrc32 automatically from the current runner:
+  npm run web:crc:update -- --config packages/web/public/samples/fallback-web.sample.json --write
+  npm run web:crc:update -- --config path/to/your.cfg.json --rom /abs/path/SM64.z64 --frames 2 --write
+- Optional ROM-backed parity test (skips when env vars unset):
+  SM64_WEB_CFG=path/to.cfg.json SM64_WEB_ROM=/abs/path/SM64.z64 npm run web:test:rom
+
 Testing layout
 - Vitest includes packages/**/tests/**/*.test.ts (Node env). The @n64/core suite contains parity/golden and integration tests for CPU timing, MMIO semantics, DL pipelines, and video composition.
 - Test utilities (packages/core/tests/helpers/test_utils.ts) provide snapshotting and seam neighborhood debugging controlled by env vars (see toggles above).

@@ -1,0 +1,69 @@
+{
+  "dir": "tmp/stitch_sweep/6x3_ci8_2d0040_tlut",
+  "total": 9,
+  "top": [
+    {
+      "file": "tmp/stitch_sweep/6x3_ci8_2d0040_tlut/off_2d0040_ci8_stitch6x3_gap2_2_w128_h32_tlut0_pix1100_rstep1000.png",
+      "score": 54.62977819707954,
+      "stddev": 52.80858068731391,
+      "grad": 3.64239501953125,
+      "hash64": "1f0303031f1f1f1f"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x3_ci8_2d0040_tlut/off_2d0040_ci8_stitch6x3_gap2_2_w128_h32_tlut0_pix1200_rstep1000.png",
+      "score": 54.62878118513648,
+      "stddev": 52.80767522810523,
+      "grad": 3.6422119140625,
+      "hash64": "1f0303031f1f1f1f"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x3_ci8_2d0040_tlut/off_2d0040_ci8_stitch6x3_gap2_2_w128_h32_tlut0_pix1000_rstep1000.png",
+      "score": 54.62619443306976,
+      "stddev": 52.80971951851898,
+      "grad": 3.6329498291015625,
+      "hash64": "1f0303031f1f1f1f"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x3_ci8_2d0040_tlut/off_2d0040_ci8_stitch6x3_gap2_2_w128_h32_tlut400_pix1000_rstep1000.png",
+      "score": 52.90632698262832,
+      "stddev": 51.94496223653457,
+      "grad": 1.9227294921875,
+      "hash64": "1f0303031f1f1f1f"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x3_ci8_2d0040_tlut/off_2d0040_ci8_stitch6x3_gap2_2_w128_h32_tlut400_pix1100_rstep1000.png",
+      "score": 52.90134276275657,
+      "stddev": 51.92994536285423,
+      "grad": 1.9427947998046875,
+      "hash64": "1f0303031f1f1f1f"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x3_ci8_2d0040_tlut/off_2d0040_ci8_stitch6x3_gap2_2_w128_h32_tlut400_pix1200_rstep1000.png",
+      "score": 52.88930800439371,
+      "stddev": 51.914259939208165,
+      "grad": 1.9500961303710938,
+      "hash64": "1f0303031f1f1f1f"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x3_ci8_2d0040_tlut/off_2d0040_ci8_stitch6x3_gap2_2_w128_h32_tlut200_pix1200_rstep1000.png",
+      "score": 52.526584092703295,
+      "stddev": 50.853148881521655,
+      "grad": 3.3468704223632812,
+      "hash64": "1f0303031f1f1f1f"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x3_ci8_2d0040_tlut/off_2d0040_ci8_stitch6x3_gap2_2_w128_h32_tlut200_pix1100_rstep1000.png",
+      "score": 52.524322924472955,
+      "stddev": 50.852962908603814,
+      "grad": 3.3427200317382812,
+      "hash64": "1f0303031f1f1f1f"
+    },
+    {
+      "file": "tmp/stitch_sweep/6x3_ci8_2d0040_tlut/off_2d0040_ci8_stitch6x3_gap2_2_w128_h32_tlut200_pix1000_rstep1000.png",
+      "score": 52.51851433222296,
+      "stddev": 50.852954563546206,
+      "grad": 3.3311195373535156,
+      "hash64": "1f0303031f1f1f1f"
+    }
+  ]
+}

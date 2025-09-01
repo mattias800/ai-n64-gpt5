@@ -1,0 +1,39 @@
+{
+  "generatedAt": "2025-09-01T15:33:45.458Z",
+  "rom": "./mario64.z64",
+  "composites": [
+    {
+      "offset": "0x1d8310",
+      "kind": "two_rows",
+      "sourceDir": "tmp/stitch2_wide/0x1d8310",
+      "file": "tmp/stitch2_wide/0x1d8310/off_1d8310_ci4_stitch6x2_gap2_2_w128_h32_tlut0_pix0_pal0.png",
+      "destPath": "tmp/exports/0x1d8310_stitch2_rows2_w128x32.png",
+      "score": 83.7620897408815,
+      "stddev": 82.19061057421484,
+      "grad": 3.1429583333333335,
+      "hash64": "00ffff00ffff0000"
+    },
+    {
+      "offset": "0x2d0040",
+      "kind": "two_rows",
+      "sourceDir": "tmp/stitch2_wide/0x2d0040",
+      "file": "tmp/stitch2_wide/0x2d0040/off_2d0040_ci4_stitch6x2_gap2_2_w128_h32_tlut0_pix0_pal0.png",
+      "destPath": "tmp/exports/0x2d0040_stitch2_rows2_w128x32.png",
+      "score": 52.00153177173285,
+      "stddev": 50.15425573006618,
+      "grad": 3.6945520833333334,
+      "hash64": "3f00003f00003f3f"
+    },
+    {
+      "offset": "0x1d8310",
+      "kind": "three_rows",
+      "sourceDir": "tmp/stitch3_wide/0x1d8310",
+      "file": "tmp/stitch3_wide/0x1d8310/off_1d8310_ci4_stitch6x3_gap2_2_w128_h32_tlut0_pix0_pal0.png",
+      "destPath": "tmp/exports/0x1d8310_stitch3_rows3_w128x32.png",
+      "score": 68.90270848404941,
+      "stddev": 66.87907827571608,
+      "grad": 4.047260416666667,
+      "hash64": "00ffff00ffffffff"
+    }
+  ]
+}

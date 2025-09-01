@@ -75,6 +75,10 @@ export const PI_BASE = 0x04600000 >>> 0; export const PI_SIZE = 0x1000;
 export const SI_BASE = 0x04800000 >>> 0; export const SI_SIZE = 0x1000;
 export const RI_BASE = 0x04700000 >>> 0; export const RI_SIZE = 0x1000;
 
+// Common cart address bases
+export const CART_ROM_BASE = 0x10000000 >>> 0; // ROM domain
+export const CART_SRAM_BASE = 0x08000000 >>> 0; // SRAM/Flash domain (we model SRAM)
+
 // MI (MIPS Interface) registers and bits
 export const MI_MODE_OFF = 0x00;
 export const MI_VERSION_OFF = 0x04;
@@ -455,11 +459,17 @@ export class PI extends MMIO {
   status = 0 >>> 0;
   private mi: MI | null = null;
   private rom: Uint8Array | null = null;
+  private sram: Uint8Array | null = null;
+  private flash: FlashRAM | null = null;
   private rdram: Uint8Array | null = null;
+  private allowROMWrites = false;
   constructor() { super(PI_SIZE); }
   setMI(mi: MI) { this.mi = mi; }
   setROM(rom: Uint8Array) { this.rom = rom; }
+  setSRAM(sram: Uint8Array) { this.sram = sram; }
+  setFlashRAM(flash: FlashRAM) { this.flash = flash; }
   setRDRAM(bytes: Uint8Array) { this.rdram = bytes; }
+  setAllowROMWrites(flag: boolean): void { this.allowROMWrites = !!flag; }
   override readU32(off: number): number {
     switch (off >>> 0) {
       case PI_DRAM_ADDR_OFF: return this.dramAddr >>> 0;
@@ -477,22 +487,47 @@ export class PI extends MMIO {
       case PI_CART_ADDR_OFF: this.cartAddr = val; return;
       case PI_RD_LEN_OFF:
         this.rdLen = val; this.status |= (PI_STATUS_DMA_BUSY | PI_STATUS_IO_BUSY);
-        // Perform a synchronous copy from ROM[cartAddr] to RDRAM[dramAddr]
-        if (this.rom && this.rdram) {
-          const baseRom = this.cartAddr >>> 0;
+        // Perform a synchronous copy from cart space -> RDRAM based on CART_ADDR mapping
+        if (this.rdram) {
+          const ca = this.cartAddr >>> 0;
           const baseRam = this.dramAddr >>> 0;
-          const len = ((val & 0x00ffffff) >>> 0) + 1; // PI uses length-1 semantics
+          const len = ((val & 0x00ffffff) >>> 0) + 1;
+          let handled = false;
+          // Flash domain (preferred over SRAM when present)
+          if (!handled && this.flash && ca >= CART_SRAM_BASE) {
+            const off = (ca - CART_SRAM_BASE) >>> 0;
+            for (let i = 0; i < len; i++) {
+              const b = this.flash.readByte(off + i);
+              if (baseRam + i < this.rdram.length) this.rdram[baseRam + i] = b;
+            }
+            handled = true;
+          }
+          // SRAM domain
+          if (!handled && this.sram && ca >= CART_SRAM_BASE) {
+            const off = (ca - CART_SRAM_BASE) >>> 0;
+            for (let i = 0; i < len; i++) {
+              const b = (off + i) < this.sram.length ? (this.sram[off + i] ?? 0) : 0;
+              if (baseRam + i < this.rdram.length) this.rdram[baseRam + i] = b;
+            }
+            handled = true;
+          }
+          // ROM domain or raw offset
+          if (!handled && this.rom) {
+            let baseRom = ca;
+            if ((baseRom >>> 28) === 0x1) baseRom = (baseRom - CART_ROM_BASE) >>> 0;
+            for (let i = 0; i < len; i++) {
+              const b = (baseRom + i) < this.rom.length ? (this.rom[baseRom + i] ?? 0) : 0;
+              if (baseRam + i < this.rdram.length) this.rdram[baseRam + i] = b;
+            }
+            handled = true;
+          }
           if (process.env.N64_TESTS_DEBUG) {
             const start = baseRam >>> 0, end = (baseRam + len) >>> 0;
             const overlaps = (start < 0x98f8+8 && end > 0x98f8) || (start < 0xa578+8 && end > 0xa578);
             if (overlaps) {
               // eslint-disable-next-line no-console
-              console.log(`[PI RD] dma to 0x${baseRam.toString(16)} len=0x${len.toString(16)} from cart=0x${baseRom.toString(16)}`);
+              console.log(`[PI RD] dma to 0x${baseRam.toString(16)} len=0x${len.toString(16)} from cart=0x${ca.toString(16)} (handled=${handled})`);
             }
-          }
-          for (let i = 0; i < len; i++) {
-            const b = this.rom[baseRom + i] ?? 0;
-            if (baseRam + i < this.rdram.length) this.rdram[baseRam + i] = b;
           }
         }
         // Normal model: leave busy bits set until completion is signaled. For the n64-tests harness,
@@ -503,19 +538,51 @@ export class PI extends MMIO {
         return;
       case PI_WR_LEN_OFF:
         this.wrLen = val; this.status |= (PI_STATUS_DMA_BUSY | PI_STATUS_IO_BUSY);
-        // Correct semantics: WR_LEN is RDRAM -> cart write. We do not model cart memory, so perform no data movement.
-        // Preserve timing/interrupt behavior only. For the n64-tests harness, auto-complete immediately
-        // to allow the PI STATUS polling loop to observe completion without an explicit STATUS ack.
-        if (process.env.N64_TESTS_DEBUG) {
+        // WR_LEN: copy from RDRAM[dramAddr] -> cart space at CART_ADDR (Flash preferred; SRAM next; ROM writes optional)
+        if (this.rdram) {
           const baseRam = this.dramAddr >>> 0;
+          const ca = this.cartAddr >>> 0;
           const len = ((val & 0x00ffffff) >>> 0) + 1;
-          const start = baseRam >>> 0, end = (baseRam + len) >>> 0;
-          const overlaps = (start < 0x98f8+8 && end > 0x98f8) || (start < 0xa578+8 && end > 0xa578);
-          if (overlaps) {
-            // eslint-disable-next-line no-console
-            console.log(`[PI WR] (ignored data) src=0x${baseRam.toString(16)} len=0x${len.toString(16)} cartAddr=0x${(this.cartAddr>>>0).toString(16)}`);
+          let handled = false;
+          // Flash domain (preferred over SRAM when present)
+          if (!handled && this.flash && ca >= CART_SRAM_BASE) {
+            const off = (ca - CART_SRAM_BASE) >>> 0;
+            for (let i = 0; i < len; i++) {
+              if ((baseRam + i) < this.rdram.length) this.flash.writeByte(off + i, this.rdram[baseRam + i]!);
+            }
+            handled = true;
+          }
+          // SRAM domain
+          if (!handled && this.sram && ca >= CART_SRAM_BASE) {
+            const off = (ca - CART_SRAM_BASE) >>> 0;
+            for (let i = 0; i < len; i++) {
+              if ((baseRam + i) < this.rdram.length && (off + i) < this.sram.length) {
+                this.sram[off + i] = this.rdram[baseRam + i]!;
+              }
+            }
+            handled = true;
+          }
+          // ROM write-back (behind flag)
+          if (!handled && this.rom && (this.allowROMWrites || !!process.env.N64_ALLOW_ROM_WRITES)) {
+            let baseRom = ca;
+            if ((baseRom >>> 28) === 0x1) baseRom = (baseRom - CART_ROM_BASE) >>> 0;
+            for (let i = 0; i < len; i++) {
+              if ((baseRam + i) < this.rdram.length && (baseRom + i) < this.rom.length) {
+                this.rom[baseRom + i] = this.rdram[baseRam + i]!;
+              }
+            }
+            handled = true;
+          }
+          if (process.env.N64_TESTS_DEBUG) {
+            const start = baseRam >>> 0, end = (baseRam + len) >>> 0;
+            const overlaps = (start < 0x98f8+8 && end > 0x98f8) || (start < 0xa578+8 && end > 0xa578);
+            if (overlaps) {
+              // eslint-disable-next-line no-console
+              console.log(`[PI WR] src=0x${baseRam.toString(16)} len=0x${len.toString(16)} cart=0x${ca.toString(16)} handled=${handled}`);
+            }
           }
         }
+        // For tests, auto-complete immediately unless a caller explicitly controls completion timing
         if (process.env.N64_TESTS) {
           this.completeDMA();
         }
@@ -542,6 +609,28 @@ case PI_STATUS_OFF:
     this.status &= ~PI_STATUS_DMA_BUSY;
     this.status &= ~PI_STATUS_IO_BUSY;
     if (this.mi) this.mi.raise(MI_INTR_PI);
+  }
+}
+
+// Simple FlashRAM stub: backing bytes buffer with byte-wise read/write.
+// This is a minimal emulation that treats the Flash domain as raw memory.
+export class FlashRAM {
+  readonly bytes: Uint8Array;
+  constructor(sizeOrBytes: number | Uint8Array = 0x20000) {
+    if (typeof sizeOrBytes === 'number') {
+      this.bytes = new Uint8Array(sizeOrBytes >>> 0);
+    } else {
+      this.bytes = sizeOrBytes;
+    }
+  }
+  readByte(off: number): number {
+    const o = off >>> 0;
+    if (o < this.bytes.length) return this.bytes[o]!;
+    return 0;
+  }
+  writeByte(off: number, val: number): void {
+    const o = off >>> 0;
+    if (o < this.bytes.length) this.bytes[o] = val & 0xff;
   }
 }
 

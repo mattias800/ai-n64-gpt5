@@ -1,0 +1,118 @@
+{
+  "dir": "tmp/probe_rspdl_refine/0x2d0040",
+  "total": 2352,
+  "top": [
+    {
+      "file": "tmp/probe_rspdl_refine/0x2d0040/off_2d0040_ci4_pal0_w128_h32_tlut0_pix0.png",
+      "score": 48.56552463473244,
+      "stddev": 47.86715223889911,
+      "grad": 1.3967447916666667,
+      "hash64": "0f0f0f0f0f0f0f0f"
+    },
+    {
+      "file": "tmp/probe_rspdl_refine/0x2d0040/off_2d0040_ci4_pal0_w128_h32_tlut0_pix100.png",
+      "score": 48.56552463473244,
+      "stddev": 47.86715223889911,
+      "grad": 1.3967447916666667,
+      "hash64": "0f0f0f0f0f0f0f0f"
+    },
+    {
+      "file": "tmp/probe_rspdl_refine/0x2d0040/off_2d0040_ci4_pal0_w128_h32_tlut0_pix120.png",
+      "score": 48.56552463473244,
+      "stddev": 47.86715223889911,
+      "grad": 1.3967447916666667,
+      "hash64": "0f0f0f0f0f0f0f0f"
+    },
+    {
+      "file": "tmp/probe_rspdl_refine/0x2d0040/off_2d0040_ci4_pal0_w128_h32_tlut0_pix140.png",
+      "score": 48.56552463473244,
+      "stddev": 47.86715223889911,
+      "grad": 1.3967447916666667,
+      "hash64": "0f0f0f0f0f0f0f0f"
+    },
+    {
+      "file": "tmp/probe_rspdl_refine/0x2d0040/off_2d0040_ci4_pal0_w128_h32_tlut0_pix1c0.png",
+      "score": 48.56552463473244,
+      "stddev": 47.86715223889911,
+      "grad": 1.3967447916666667,
+      "hash64": "0f0f0f0f0f0f0f0f"
+    },
+    {
+      "file": "tmp/probe_rspdl_refine/0x2d0040/off_2d0040_ci4_pal0_w128_h32_tlut0_pix1e0.png",
+      "score": 48.56552463473244,
+      "stddev": 47.86715223889911,
+      "grad": 1.3967447916666667,
+      "hash64": "0f0f0f0f0f0f0f0f"
+    },
+    {
+      "file": "tmp/probe_rspdl_refine/0x2d0040/off_2d0040_ci4_pal0_w128_h32_tlut0_pix20.png",
+      "score": 48.56552463473244,
+      "stddev": 47.86715223889911,
+      "grad": 1.3967447916666667,
+      "hash64": "0f0f0f0f0f0f0f0f"
+    },
+    {
+      "file": "tmp/probe_rspdl_refine/0x2d0040/off_2d0040_ci4_pal0_w128_h32_tlut0_pix200.png",
+      "score": 48.56552463473244,
+      "stddev": 47.86715223889911,
+      "grad": 1.3967447916666667,
+      "hash64": "0f0f0f0f0f0f0f0f"
+    },
+    {
+      "file": "tmp/probe_rspdl_refine/0x2d0040/off_2d0040_ci4_pal0_w128_h32_tlut0_pix220.png",
+      "score": 48.56552463473244,
+      "stddev": 47.86715223889911,
+      "grad": 1.3967447916666667,
+      "hash64": "0f0f0f0f0f0f0f0f"
+    },
+    {
+      "file": "tmp/probe_rspdl_refine/0x2d0040/off_2d0040_ci4_pal0_w128_h32_tlut0_pix240.png",
+      "score": 48.56552463473244,
+      "stddev": 47.86715223889911,
+      "grad": 1.3967447916666667,
+      "hash64": "0f0f0f0f0f0f0f0f"
+    },
+    {
+      "file": "tmp/probe_rspdl_refine/0x2d0040/off_2d0040_ci4_pal0_w128_h32_tlut0_pix40.png",
+      "score": 48.56552463473244,
+      "stddev": 47.86715223889911,
+      "grad": 1.3967447916666667,
+      "hash64": "0f0f0f0f0f0f0f0f"
+    },
+    {
+      "file": "tmp/probe_rspdl_refine/0x2d0040/off_2d0040_ci4_pal0_w128_h32_tlut0_pix60.png",
+      "score": 48.56552463473244,
+      "stddev": 47.86715223889911,
+      "grad": 1.3967447916666667,
+      "hash64": "0f0f0f0f0f0f0f0f"
+    },
+    {
+      "file": "tmp/probe_rspdl_refine/0x2d0040/off_2d0040_ci4_pal0_w128_h32_tlut0_pix80.png",
+      "score": 48.56552463473244,
+      "stddev": 47.86715223889911,
+      "grad": 1.3967447916666667,
+      "hash64": "0f0f0f0f0f0f0f0f"
+    },
+    {
+      "file": "tmp/probe_rspdl_refine/0x2d0040/off_2d0040_ci4_pal0_w128_h32_tlut0_pixa0.png",
+      "score": 48.56552463473244,
+      "stddev": 47.86715223889911,
+      "grad": 1.3967447916666667,
+      "hash64": "0f0f0f0f0f0f0f0f"
+    },
+    {
+      "file": "tmp/probe_rspdl_refine/0x2d0040/off_2d0040_ci4_pal0_w128_h32_tlut0_pixc0.png",
+      "score": 48.56552463473244,
+      "stddev": 47.86715223889911,
+      "grad": 1.3967447916666667,
+      "hash64": "0f0f0f0f0f0f0f0f"
+    },
+    {
+      "file": "tmp/probe_rspdl_refine/0x2d0040/off_2d0040_ci4_pal0_w128_h32_tlut0_pixe0.png",
+      "score": 48.56552463473244,
+      "stddev": 47.86715223889911,
+      "grad": 1.3967447916666667,
+      "hash64": "0f0f0f0f0f0f0f0f"
+    }
+  ]
+}

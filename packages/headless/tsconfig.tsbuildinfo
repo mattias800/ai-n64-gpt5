@@ -1,1 +1,1 @@
-{"root":["./src/cli.ts","./src/lib.ts"],"version":"5.9.2"}
+{"root":["./src/cli.ts","./src/discover_f3dex.ts","./src/lib.ts"],"version":"5.9.2"}
