@@ -1,3 +1,82 @@
+# SM64 bring-up plan (cycle-aware)
+
+Goal
+- Boot a legally obtained Super Mario 64 ROM and produce on-screen frames using this repo’s cycle-driven emulator.
+- Use the discrete-cycle scheduler for CPU/devices; render via the F3DEX bridge for visuals.
+- Capture artifacts (PNGs + timing CSV) and run optional automated checks.
+
+Acceptance criteria
+- Build succeeds with no TS errors.
+- rom-boot-run completes within the chosen cycle budget and produces at least one bridge snapshot and a timing trace.
+- Early boot activity observed: VI width/origin writes, at least one PI DMA read, at least one SP start.
+- Optional: SM64 title slice snapshot is produced from a config; web parity test passes when configured.
+
+Assumptions
+- macOS, shell=zsh.
+- Working dir: /Users/mattias800/temp/ai-n64-gpt5.
+- Node.js LTS installed.
+- You will provide an absolute path to a legally obtained ROM (SM64.z64).
+
+Commands
+1) Install and build
+```
+npm ci
+npm run build
+```
+
+2) Prepare output dirs
+```
+rm -rf tmp/boot tmp/title tmp/logs
+mkdir -p tmp/boot tmp/title tmp/logs
+```
+
+3) Quick CLI sanity check (no ROM)
+```
+node packages/headless/dist/cli.js sm64-demo --frames 1 --snapshot tmp/sm64_demo.png
+node packages/headless/dist/cli.js rspdl-ci8-ring --frames 2 --snapshot tmp/ring.png
+```
+
+4) Export ROM path
+```
+export SM64_ROM="/absolute/path/to/SM64.z64"
+```
+
+5) Boot with cycle-aware stepping + F3DEX bridge
+```
+node packages/headless/dist/cli.js rom-boot-run "$SM64_ROM" \
+  --cycles 50000000 \
+  --vi-interval 10000 \
+  --width 320 --height 240 \
+  --snapshot tmp/boot/boot.png \
+  --timing-profile realistic \
+  --trace-timing tmp/boot/timing_50M.csv \
+  --bridge --bridge-log 2>&1 | tee tmp/logs/rom-boot-run_50M.log
+```
+If needed, retry with higher cycle budgets (100M, 150M) writing timing_100M.csv, timing_150M.csv.
+
+6) Automated early-boot check (optional)
+```
+SM64_ROM="$SM64_ROM" npx vitest run packages/headless/tests/sm64_boot_optional.test.ts
+```
+
+7) Optional: ROM-backed title slice
+```
+cp packages/headless/samples/sm64-rom-title.sample.json tmp/sm64-rom-title.json
+# edit tmp/sm64-rom-title.json: set "rom" and correct assets/tiles for your ROM
+node packages/headless/dist/cli.js sm64-rom-title tmp/sm64-rom-title.json --snapshot tmp/title/sm64_title.png 2>&1 | tee tmp/logs/sm64_rom_title.log
+```
+
+Artifacts
+- tmp/boot/boot_bridge*.png
+- tmp/boot/timing_*.csv
+- tmp/logs/rom-boot-run_*.log
+- Optional: tmp/title/sm64_title.png, tmp/logs/sm64_rom_title.log
+
+Notes
+- For timing visibility, --trace-timing writes a CSV with cycle,device,event,details.
+- The F3DEX bridge translates discovered display lists to HLE rendering; this provides visuals while keeping CPU/device stepping cycle-aware.
+- For full cycle accuracy across RSP/RDP, future work is required beyond this plan.
+
 # N64 Emulator in TypeScript — Plan and Verification Strategy
 
 Scope and philosophy

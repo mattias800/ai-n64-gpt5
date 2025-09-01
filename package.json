@@ -24,7 +24,8 @@
     "web:test:f3d": "vitest run packages/web/tests/f3d_table_core.test.ts",
     "web:crc:update": "node packages/web/dist/gen_expected_crc.js",
     "web:test:rom": "vitest run packages/web/tests/sm64_title_rom_optional.test.ts",
-    "headless:discover": "node packages/headless/dist/discover_f3dex.js"
+    "headless:discover": "node packages/headless/dist/discover_f3dex.js",
+    "sm64:bringup": "bash scripts/sm64_bringup.sh"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

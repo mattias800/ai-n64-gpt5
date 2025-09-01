@@ -77,6 +77,17 @@ Notes:
 - Snapshot format is inferred from the output extension (.png uses pngjs; otherwise PPM P6 is written).
 - Many commands accept timing (start/interval/frames), framebuffer (width/height/origin), and per-frame layout options via JSON.
 
+SM64 bring-up (one command)
+- A reproducible bring-up script runs build, cycle-stepped boot (with bridge), MIO0 scan/probe, ROM-backed title render, CRC parity, and writes an artifacts manifest.
+- Usage:
+  SM64_ROM=/abs/path/SM64.z64 npm run sm64:bringup
+- Outputs:
+  - tmp/boot/*.png and timing_*.csv
+  - tmp/title/*.png
+  - tmp/probe/* (sweep images per offset)
+  - tmp/mio0/* (decompressed MIO0 blobs)
+  - tmp/MANIFEST.txt and tmp/sm64_artifacts.tgz
+
 High-level architecture (big picture)
 - CPU execution model (packages/core/src/cpu):
   - Implements a MIPS-like pipeline with CP0 (exceptions/interrupts), precise branch-delay semantics, and ERET handling.
