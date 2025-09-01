@@ -15,3 +15,6 @@ coverage/
 # Build artifacts
 packages/**/dist/
 packages/**/build/
+
+# Project artifacts
+tmp/
