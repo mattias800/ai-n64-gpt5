@@ -474,6 +474,8 @@ export class PI extends MMIO {
   private flash: FlashRAM | null = null;
   private rdram: Uint8Array | null = null;
   private allowROMWrites = false;
+  private dmaCompletionCallback: (() => void) | null = null;
+  private dmaCompletionCycles = 0;
   constructor() { super(PI_SIZE); }
   setMI(mi: MI) { this.mi = mi; }
   setROM(rom: Uint8Array) { this.rom = rom; }
@@ -481,6 +483,21 @@ export class PI extends MMIO {
   setFlashRAM(flash: FlashRAM) { this.flash = flash; }
   setRDRAM(bytes: Uint8Array) { this.rdram = bytes; }
   setAllowROMWrites(flag: boolean): void { this.allowROMWrites = !!flag; }
+  
+  // Set a callback for scheduling DMA completion with specified cycle delay
+  setDMAScheduler(scheduler: (cycles: number, callback: () => void) => void): void {
+    this.dmaScheduler = scheduler;
+  }
+  private dmaScheduler: ((cycles: number, callback: () => void) => void) | null = null;
+  
+  // Calculate realistic PI DMA latency in cycles based on transfer length
+  private calculateDMALatency(length: number): number {
+    // Simplified model: base latency + per-byte transfer time
+    // Real hardware has more complex timing based on domain and alignment
+    const baseLatency = 50; // Base cycles for DMA setup
+    const bytesPerCycle = 2; // Approximate transfer rate
+    return baseLatency + Math.ceil(length / bytesPerCycle);
+  }
   override readU32(off: number): number {
     switch (off >>> 0) {
       case PI_DRAM_ADDR_OFF: return this.dramAddr >>> 0;
@@ -499,15 +516,15 @@ export class PI extends MMIO {
       case PI_RD_LEN_OFF:
         this.rdLen = val; this.status |= (PI_STATUS_DMA_BUSY | PI_STATUS_IO_BUSY);
         // Perform a synchronous copy from cart space -> RDRAM based on CART_ADDR mapping
+        const rdLen = ((val & 0x00ffffff) >>> 0) + 1;
         if (this.rdram) {
           const ca = this.cartAddr >>> 0;
           const baseRam = this.dramAddr >>> 0;
-          const len = ((val & 0x00ffffff) >>> 0) + 1;
           let handled = false;
           // Flash domain (preferred over SRAM when present)
           if (!handled && this.flash && ca >= CART_SRAM_BASE) {
             const off = (ca - CART_SRAM_BASE) >>> 0;
-            for (let i = 0; i < len; i++) {
+            for (let i = 0; i < rdLen; i++) {
               const b = this.flash.readByte(off + i);
               if (baseRam + i < this.rdram.length) this.rdram[baseRam + i] = b;
             }
@@ -516,7 +533,7 @@ export class PI extends MMIO {
           // SRAM domain
           if (!handled && this.sram && ca >= CART_SRAM_BASE) {
             const off = (ca - CART_SRAM_BASE) >>> 0;
-            for (let i = 0; i < len; i++) {
+            for (let i = 0; i < rdLen; i++) {
               const b = (off + i) < this.sram.length ? (this.sram[off + i] ?? 0) : 0;
               if (baseRam + i < this.rdram.length) this.rdram[baseRam + i] = b;
             }
@@ -526,39 +543,45 @@ export class PI extends MMIO {
           if (!handled && this.rom) {
             let baseRom = ca;
             if ((baseRom >>> 28) === 0x1) baseRom = (baseRom - CART_ROM_BASE) >>> 0;
-            for (let i = 0; i < len; i++) {
+            for (let i = 0; i < rdLen; i++) {
               const b = (baseRom + i) < this.rom.length ? (this.rom[baseRom + i] ?? 0) : 0;
               if (baseRam + i < this.rdram.length) this.rdram[baseRam + i] = b;
             }
             handled = true;
           }
           if (envFlag('N64_TESTS_DEBUG')) {
-            const start = baseRam >>> 0, end = (baseRam + len) >>> 0;
+            const start = baseRam >>> 0, end = (baseRam + rdLen) >>> 0;
             const overlaps = (start < 0x98f8+8 && end > 0x98f8) || (start < 0xa578+8 && end > 0xa578);
             if (overlaps) {
               // eslint-disable-next-line no-console
-              console.log(`[PI RD] dma to 0x${baseRam.toString(16)} len=0x${len.toString(16)} from cart=0x${ca.toString(16)} (handled=${handled})`);
+              console.log(`[PI RD] dma to 0x${baseRam.toString(16)} len=0x${rdLen.toString(16)} from cart=0x${ca.toString(16)} (handled=${handled})`);
             }
           }
         }
-        // Normal model: leave busy bits set until completion is signaled. For the n64-tests harness,
-        // auto-complete immediately to unblock the young-emulator PI poll loop.
-        if (envFlag('N64_TESTS')) {
+        // Schedule DMA completion after realistic latency
+        const rdLatency = this.calculateDMALatency(rdLen);
+        if (this.dmaScheduler) {
+          // Use provided scheduler for async completion
+          this.dmaScheduler(rdLatency, () => this.completeDMA());
+        } else if (envFlag('N64_TESTS')) {
+          // For tests, auto-complete immediately
           this.completeDMA();
         }
+        // If no scheduler and not in test mode, leave DMA busy
+        // The calling environment must handle completion explicitly
         return;
       case PI_WR_LEN_OFF:
         this.wrLen = val; this.status |= (PI_STATUS_DMA_BUSY | PI_STATUS_IO_BUSY);
         // WR_LEN: copy from RDRAM[dramAddr] -> cart space at CART_ADDR (Flash preferred; SRAM next; ROM writes optional)
+        const wrLen = ((val & 0x00ffffff) >>> 0) + 1;
         if (this.rdram) {
           const baseRam = this.dramAddr >>> 0;
           const ca = this.cartAddr >>> 0;
-          const len = ((val & 0x00ffffff) >>> 0) + 1;
           let handled = false;
           // Flash domain (preferred over SRAM when present)
           if (!handled && this.flash && ca >= CART_SRAM_BASE) {
             const off = (ca - CART_SRAM_BASE) >>> 0;
-            for (let i = 0; i < len; i++) {
+            for (let i = 0; i < wrLen; i++) {
               if ((baseRam + i) < this.rdram.length) this.flash.writeByte(off + i, this.rdram[baseRam + i]!);
             }
             handled = true;
@@ -566,7 +589,7 @@ export class PI extends MMIO {
           // SRAM domain
           if (!handled && this.sram && ca >= CART_SRAM_BASE) {
             const off = (ca - CART_SRAM_BASE) >>> 0;
-            for (let i = 0; i < len; i++) {
+            for (let i = 0; i < wrLen; i++) {
               if ((baseRam + i) < this.rdram.length && (off + i) < this.sram.length) {
                 this.sram[off + i] = this.rdram[baseRam + i]!;
               }
@@ -577,7 +600,7 @@ export class PI extends MMIO {
           if (!handled && this.rom && (this.allowROMWrites || envFlag('N64_ALLOW_ROM_WRITES'))) {
             let baseRom = ca;
             if ((baseRom >>> 28) === 0x1) baseRom = (baseRom - CART_ROM_BASE) >>> 0;
-            for (let i = 0; i < len; i++) {
+            for (let i = 0; i < wrLen; i++) {
               if ((baseRam + i) < this.rdram.length && (baseRom + i) < this.rom.length) {
                 this.rom[baseRom + i] = this.rdram[baseRam + i]!;
               }
@@ -585,18 +608,25 @@ export class PI extends MMIO {
             handled = true;
           }
           if (envFlag('N64_TESTS_DEBUG')) {
-            const start = baseRam >>> 0, end = (baseRam + len) >>> 0;
+            const start = baseRam >>> 0, end = (baseRam + wrLen) >>> 0;
             const overlaps = (start < 0x98f8+8 && end > 0x98f8) || (start < 0xa578+8 && end > 0xa578);
             if (overlaps) {
               // eslint-disable-next-line no-console
-              console.log(`[PI WR] src=0x${baseRam.toString(16)} len=0x${len.toString(16)} cart=0x${ca.toString(16)} handled=${handled}`);
+              console.log(`[PI WR] src=0x${baseRam.toString(16)} len=0x${wrLen.toString(16)} cart=0x${ca.toString(16)} handled=${handled}`);
             }
           }
         }
-        // For tests, auto-complete immediately unless a caller explicitly controls completion timing
-        if (envFlag('N64_TESTS')) {
+        // Schedule DMA completion after realistic latency
+        const wrLatency = this.calculateDMALatency(wrLen);
+        if (this.dmaScheduler) {
+          // Use provided scheduler for async completion
+          this.dmaScheduler(wrLatency, () => this.completeDMA());
+        } else if (envFlag('N64_TESTS')) {
+          // For tests, auto-complete immediately
           this.completeDMA();
         }
+        // If no scheduler and not in test mode, leave DMA busy
+        // The calling environment must handle completion explicitly
         return;
 case PI_STATUS_OFF:
         // Writing 1 bits clears corresponding busy flags.
