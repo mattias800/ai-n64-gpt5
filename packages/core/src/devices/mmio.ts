@@ -1,5 +1,16 @@
 import { readU32BE, writeU32BE } from '../utils/bit.js';
 
+// Safe environment flag checker that won't break in the browser (where process is undefined)
+function envFlag(name: string): boolean {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const p: any = (typeof process !== 'undefined') ? (process as any) : undefined;
+    return !!p?.env?.[name];
+  } catch {
+    return false;
+  }
+}
+
 // Merge write value across byte lanes so that write-one-to-clear semantics are robust to
 // 8/16/32-bit stores on a big-endian bus. This treats any 1 bit written in any lane as set.
 function mergeAckMask(val: number): number {
@@ -521,7 +532,7 @@ export class PI extends MMIO {
             }
             handled = true;
           }
-          if (process.env.N64_TESTS_DEBUG) {
+          if (envFlag('N64_TESTS_DEBUG')) {
             const start = baseRam >>> 0, end = (baseRam + len) >>> 0;
             const overlaps = (start < 0x98f8+8 && end > 0x98f8) || (start < 0xa578+8 && end > 0xa578);
             if (overlaps) {
@@ -532,7 +543,7 @@ export class PI extends MMIO {
         }
         // Normal model: leave busy bits set until completion is signaled. For the n64-tests harness,
         // auto-complete immediately to unblock the young-emulator PI poll loop.
-        if (process.env.N64_TESTS) {
+        if (envFlag('N64_TESTS')) {
           this.completeDMA();
         }
         return;
@@ -563,7 +574,7 @@ export class PI extends MMIO {
             handled = true;
           }
           // ROM write-back (behind flag)
-          if (!handled && this.rom && (this.allowROMWrites || !!process.env.N64_ALLOW_ROM_WRITES)) {
+          if (!handled && this.rom && (this.allowROMWrites || envFlag('N64_ALLOW_ROM_WRITES'))) {
             let baseRom = ca;
             if ((baseRom >>> 28) === 0x1) baseRom = (baseRom - CART_ROM_BASE) >>> 0;
             for (let i = 0; i < len; i++) {
@@ -573,7 +584,7 @@ export class PI extends MMIO {
             }
             handled = true;
           }
-          if (process.env.N64_TESTS_DEBUG) {
+          if (envFlag('N64_TESTS_DEBUG')) {
             const start = baseRam >>> 0, end = (baseRam + len) >>> 0;
             const overlaps = (start < 0x98f8+8 && end > 0x98f8) || (start < 0xa578+8 && end > 0xa578);
             if (overlaps) {
@@ -583,7 +594,7 @@ export class PI extends MMIO {
           }
         }
         // For tests, auto-complete immediately unless a caller explicitly controls completion timing
-        if (process.env.N64_TESTS) {
+        if (envFlag('N64_TESTS')) {
           this.completeDMA();
         }
         return;

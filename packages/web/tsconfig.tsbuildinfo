@@ -1,1 +1,1 @@
-{"root":["./src/cli.ts","./src/crc32.ts","./src/f3d_runner.ts","./src/f3dex_runner.ts","./src/gen_expected_crc.ts","./src/main.ts","./src/sm64_title_runner.ts","./src/types.ts","./src/ui.ts","./src/audio/index.ts","./src/gl/index.ts"],"version":"5.9.2"}
+{"root":["./src/cli.ts","./src/crc32.ts","./src/f3d_runner.ts","./src/f3dex_runner.ts","./src/f3dex_table_core.ts","./src/gen_expected_crc.ts","./src/main.ts","./src/rom_boot_runner.ts","./src/sm64_title_runner.ts","./src/types.ts","./src/ui.ts","./src/audio/index.ts","./src/gl/index.ts"],"version":"5.9.2"}

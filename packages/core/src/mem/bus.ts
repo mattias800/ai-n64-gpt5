@@ -1,6 +1,17 @@
 import { readU16BE, readU32BE, writeU16BE, writeU32BE } from '../utils/bit.js';
-import { AI, AI_BASE, AI_SIZE, DP, DP_BASE, DP_SIZE, MI, MI_BASE, MI_SIZE, PI, PI_BASE, PI_SIZE, SI, SI_BASE, SI_SIZE, SP, SP_BASE, SP_SIZE, VI, VI_BASE, VI_SIZE, RI, RI_BASE, RI_SIZE, FlashRAM } from '../devices/mmio.js';
+import { MI, MI_BASE, MI_SIZE, SP, SP_BASE, SP_SIZE, DP, DP_BASE, DP_SIZE, VI, VI_BASE, VI_SIZE, AI, AI_BASE, AI_SIZE, PI, PI_BASE, PI_SIZE, SI, SI_BASE, SI_SIZE, RI, RI_BASE, RI_SIZE, FlashRAM } from '../devices/mmio.js';
+import { CART_ROM_BASE } from '../devices/mmio.js';
 
+// Safe environment flag checker for browser builds
+function envFlag(name: string): boolean {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const p: any = (typeof process !== 'undefined') ? (process as any) : undefined;
+    return !!p?.env?.[name];
+  } catch {
+    return false;
+  }
+}
 export class RDRAM {
   readonly bytes: Uint8Array;
   constructor(size = 8 * 1024 * 1024) {
@@ -164,7 +175,7 @@ export class Bus {
     if (p < this.rdram.bytes.length) {
       this.rdram.bytes[p] = value & 0xff;
       // debug: watch stores to test-data windows if enabled
-      if (process.env.N64_TESTS_DEBUG) {
+      if (envFlag('N64_TESTS_DEBUG')) {
         if ((p >= 0x98f8 && p < 0x98f8 + 8) || (p >= 0xa578 && p < 0xa578 + 8)) {
           // eslint-disable-next-line no-console
           console.log(`[bus.storeU8] p=0x${p.toString(16)} v=0x${(value & 0xff).toString(16).padStart(2,'0')}`);
@@ -181,7 +192,7 @@ export class Bus {
     if (this.writeMMIO(mmAligned, (value & 0xffff) << (mmOff2 === 0 ? 16 : 0))) return;
     if (p + 2 <= this.rdram.bytes.length) {
       writeU16BE(this.rdram.bytes, p, value >>> 0);
-      if (process.env.N64_TESTS_DEBUG) {
+      if (envFlag('N64_TESTS_DEBUG')) {
         if ((p >= 0x98f8 && p < 0x98f8 + 8) || (p >= 0xa578 && p < 0xa578 + 8)) {
           // eslint-disable-next-line no-console
           console.log(`[bus.storeU16] p=0x${p.toString(16)} v=0x${(value & 0xffff).toString(16).padStart(4,'0')}`);
@@ -195,7 +206,7 @@ export class Bus {
     if (this.writeMMIO(p, value >>> 0)) return;
     if (p + 4 <= this.rdram.bytes.length) {
       writeU32BE(this.rdram.bytes, p, value >>> 0);
-      if (process.env.N64_TESTS_DEBUG) {
+      if (envFlag('N64_TESTS_DEBUG')) {
         if ((p >= 0x98f8 && p < 0x98f8 + 8) || (p >= 0xa578 && p < 0xa578 + 8)) {
           // eslint-disable-next-line no-console
           console.log(`[bus.storeU32] p=0x${p.toString(16)} v=0x${(value >>> 0).toString(16).padStart(8,'0')}`);

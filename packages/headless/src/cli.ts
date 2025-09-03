@@ -63,7 +63,7 @@ function printUsage() {
   n64-headless sm64-rom-title <config.json> [--snapshot path.png]
    n64-headless rom-boot-run <rom.z64> [--cycles N] [--vi-interval CYC] [--width W] [--height H] [--snapshot path.png]
      [--discover] [--boot path.json] [--bridge] [--bridge-any] [--bridge-log] [--ipl-hle] [--jump-header]
-     [--vi-init] [--fastboot-hle]
+     [--vi-init] [--vi-vblank] [--fastboot-hle] [--skip-reserved-at 0xADDR[,0xADDR2,...]] [--vector-autoreturn]
      [--sram-file path.bin] [--sram-size BYTES] [--sram-save-on-exit]
      [--flash-file path.bin] [--flash-size BYTES] [--flash-save-on-exit]
      [--timing-profile dev|fast|realistic] [--trace-timing [path.csv]]
@@ -1292,8 +1292,11 @@ async function runRomBootRun(args: string[]) {
   const forceSpAt = opts['force-sp-at'] ? parseNum(opts['force-sp-at'], 0) >>> 0 : 0;
   const viInit = Object.prototype.hasOwnProperty.call(opts, 'vi-init');
   const noViVblank = Object.prototype.hasOwnProperty.call(opts, 'no-vi-vblank') || Object.prototype.hasOwnProperty.call(opts, 'noViVblank') || Object.prototype.hasOwnProperty.call(opts, 'no_vi_vblank');
+  const viVblank = Object.prototype.hasOwnProperty.call(opts, 'vi-vblank') || Object.prototype.hasOwnProperty.call(opts, 'viVblank') || Object.prototype.hasOwnProperty.call(opts, 'vi_vblank');
   const fastbootHle = Object.prototype.hasOwnProperty.call(opts, 'fastboot-hle');
   const timerHle = Object.prototype.hasOwnProperty.call(opts, 'timer-hle') || Object.prototype.hasOwnProperty.call(opts, 'timerHle') || Object.prototype.hasOwnProperty.call(opts, 'timer_hle');
+  const skipReservedAtOpt = opts['skip-reserved-at'] || opts['skipReservedAt'] || opts['skip_reserved_at'] || '';
+  const vectorAutoReturn = Object.prototype.hasOwnProperty.call(opts, 'vector-autoreturn') || Object.prototype.hasOwnProperty.call(opts, 'vectorAutoReturn') || Object.prototype.hasOwnProperty.call(opts, 'vector_auto_return');
   const iplCart = parseNum(opts['ipl-cart'], 0);
   const iplLen = parseNum(opts['ipl-len'], 2 * 1024 * 1024);
   const traceBoot = parseNum(opts['trace-boot'], 0);
@@ -1365,6 +1368,16 @@ async function runRomBootRun(args: string[]) {
   const bus = new Bus(rdram);
   const cpu = new CPU(bus);
   const sys = new System(cpu, bus);
+  // Targeted reserved-instruction skip support: allow specifying one or more PCs to treat as NOPs
+  if (skipReservedAtOpt && typeof skipReservedAtOpt === 'string') {
+    const parts = skipReservedAtOpt.split(',').map(s => s.trim()).filter(Boolean);
+    for (const p of parts) {
+      const pc = parseNum(p, 0) >>> 0;
+      if (pc) {
+        try { cpu.addReservedSkipPC(pc >>> 0); } catch { (cpu as any).addReservedSkipPC?.(pc >>> 0); }
+      }
+    }
+  }
 
   // Compact timing trace (CSV-like) and simple PI latency profiles
   const timingLines: string[] = [];
@@ -1403,6 +1416,9 @@ async function runRomBootRun(args: string[]) {
       if (sys.cycle < traceBootSkip) return;
       if (trace.length < traceBoot) trace.push({ pc: `0x${pc.toString(16)}`, instr: `0x${instr.toString(16)}` });
     };
+  }
+  if (vectorAutoReturn) {
+    try { (cpu as any).vectorAutoReturn = true; } catch {}
   }
 
   // Utility to hex-encode a byte array
@@ -1502,9 +1518,9 @@ async function runRomBootRun(args: string[]) {
 
   // Optional minimal fastboot HLE: enable CPU interrupts, MI masks, and perform a controller handshake once.
   if (fastbootHle) {
-    // Enable CPU IE and IM2 (IP2 used for MI) + IM7 (timer)
-    const IE = 1 << 0; const IM2 = 1 << (8 + 2); const IM7 = 1 << (8 + 7);
-    cpu.cop0.write(12, (IE | IM2 | IM7) >>> 0);
+    // Enable CPU IE and IM2 (IP2 used for MI) + IM7 (timer) and CU1 (FPU usable)
+    const IE = 1 << 0; const IM2 = 1 << (8 + 2); const IM7 = 1 << (8 + 7); const CU1 = 1 << 29;
+    cpu.cop0.write(12, (IE | IM2 | IM7 | CU1) >>> 0);
     // Enable MI masks for SP|SI|VI|PI|DP (bits 0,1,3,4,5)
     const MI_INTR_MASK_OFF = 0x0c >>> 0;
     const mask = ((1<<0)|(1<<1)|(1<<3)|(1<<4)|(1<<5)) >>> 0;
@@ -1653,6 +1669,11 @@ async function runRomBootRun(args: string[]) {
           return;
         }
         if (data_ptr >>> 0) {
+          // Convert physical address to KSEG0 virtual address if needed
+          let dlAddr = data_ptr >>> 0;
+          if (dlAddr < 0x80000000) {
+            dlAddr = (0x80000000 + dlAddr) >>> 0;
+          }
           const fbBytes = (width * height * 2) >>> 0;
           let fbOrigin = (viOrigin >>> 0);
           if (fbOrigin === 0) {
@@ -1668,7 +1689,7 @@ async function runRomBootRun(args: string[]) {
           // Optional background gradient for bridge
           const bgStart = bridgeBgStartOpt ?? undefined;
           const bgEnd = bridgeBgEndOpt ?? undefined;
-          translateF3DEXAndExecNow(bus, width, height, data_ptr >>> 0, stagingBase >>> 0, strideWords >>> 0, bgStart, bgEnd);
+          translateF3DEXAndExecNow(bus, width, height, dlAddr >>> 0, stagingBase >>> 0, strideWords >>> 0, bgStart, bgEnd);
           const img = viScanout(bus, width, height);
           const c = crc32(img);
           if (bridgeLog) {
@@ -2178,7 +2199,7 @@ async function runRomBootRun(args: string[]) {
       scheduledPokes.push({ cyc, items: groupItems });
     }
   }
-  if (!fastbootHle && !noViVblank) {
+  if ((!fastbootHle || viVblank) && !noViVblank) {
     sys.scheduleEvery(viInterval >>> 0, viInterval >>> 0, Math.max(1, Math.floor(cycles / Math.max(1, viInterval))), () => {
       bus.vi.vblank();
       emitTiming('vi_vblank', 'vi', { origin: viOrigin >>> 0, width: viWidth >>> 0 });

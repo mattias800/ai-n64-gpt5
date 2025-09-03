@@ -37,6 +37,34 @@
             <input id="frames" type="number" min="1" max="8" value="2" />
           </label>
         </div>
+        <div class="col" style="border:1px solid #ddd; border-radius:6px; padding:8px;">
+          <strong>ROM boot (HLE) settings</strong>
+          <div class="row">
+            <label>
+              Cycles
+              <input id="cycles" type="number" min="100000" step="1000000" value="15000000" />
+            </label>
+            <label>
+              VI interval
+              <input id="viInterval" type="number" min="1000" step="1000" value="10000" />
+            </label>
+          </div>
+          <div class="row">
+            <label><input id="vectorAuto" type="checkbox" checked /> Vector auto-return</label>
+            <label><input id="fastbootHle" type="checkbox" checked /> Fastboot HLE (skip reserved at non-target PCs)</label>
+          </div>
+          <div class="row">
+            <label><input id="jumpHeader" type="checkbox" /> Jump to header PC</label>
+            <label><input id="viInit" type="checkbox" /> VI init fallback</label>
+          </div>
+          <div class="row">
+            <label style="flex:1 1 auto;">
+              Targeted skip PC(s)
+              <input id="skipAt" type="text" placeholder="e.g. 0x8005c800,0xXXXXXXXX" />
+            </label>
+          </div>
+          <small class="hint">If no config JSON is provided, these settings are used to attempt a short ROM boot. If boot produces frames, they will be displayed; otherwise, the app falls back to the config-driven path.</small>
+        </div>
         <div class="row">
           <button id="runBtn">Run</button>
           <button id="resetBtn">Reset</button>

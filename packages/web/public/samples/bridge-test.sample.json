@@ -1,0 +1,25 @@
+{
+  "video": { "width": 320, "height": 240, "origin": "0xF000" },
+  "timing": { "start": 2, "interval": 3, "frames": 1, "spOffset": 1 },
+  "f3dex": { "strideWords": 256, "bgStart": "0x001F", "bgEnd": "0x07FF" },
+  "piLoads": [],
+  "tluts": [
+    { "addr": "0x54800", "entries": [
+      "0x0", "0x7c1"
+    ]}
+  ],
+  "blobs": [
+    { "addr": "0x55800", "dataHex": "" }
+  ],
+  "frames": [
+    { "dlWords": [
+      "0xf0000002", "0x001f", "0x07ff", /* Gradient */
+      "0xf0000002", "0x54800",          /* LOADTLUT 2 entries */
+      "0xfd080000", "0x55800",          /* SETTIMG CI8 at pix */
+      "0xf2000000", "0x03c03c",          /* SETTILESIZE 16x16 */
+      "0xe4050050", "0x00900090",        /* TEXRECT (80,80)-(160,160) */
+      "0xdf000000", "0x0"                /* END */
+    ]}
+  ]
+}
+

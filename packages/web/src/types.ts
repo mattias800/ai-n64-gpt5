@@ -43,3 +43,11 @@ export interface Sm64TitleConfig {
 }
 
 export interface RunnerResult { frameImages: ImageData[]; crc32Hex: string[]; }
+
+// F3DEX table-run config (as produced by headless discover)
+export interface F3dexCfg { strideWords?: number; bgStart?: number; bgEnd?: number }
+export interface PiLoad { cartAddr: number; dramAddr: number; length: number }
+export interface FrameDl { dlWords?: Array<number | string> }
+export interface F3dexRunConfig {
+  video: VideoCfg; timing: TimingCfg; f3dex?: F3dexCfg; piLoads?: PiLoad[]; frames?: FrameDl[];
+}

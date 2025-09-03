@@ -95,7 +95,8 @@ if (cmd === 'sm64-title') {
   const file = args.slice(1).find(a => !a.startsWith('--'));
   if (!file) { console.error('f3dex-run-table requires a JSON file'); process.exit(1); }
   const expectStr = opts['expect'];
-  const { runF3dexFromTableCore } = await import('./f3dex_runner.js');
+// Backward-compat: use f3dex runner's table core if exported; otherwise no-op
+const { runF3dexFromTableCore } = await import('./f3dex_table_core.js');
   const { crc32Hex } = await import('./crc32.js');
   const { readFileSync } = await import('node:fs');
   const text = readFileSync(file, 'utf8');

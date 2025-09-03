@@ -27,6 +27,17 @@ export class CPU {
   // Fastboot/HLE option: when enabled, treat ReservedInstruction as a NOP (skip)
   // instead of raising an exception. Default is false to preserve accuracy.
   public fastbootSkipReserved = false;
+  // Optional: auto-return from exception vector NOP loops (helps escape empty vectors). Default false.
+  public vectorAutoReturn = false;
+  // Targeted skip list: treat ReservedInstruction at specific PC addresses as NOPs.
+  // Useful to unblock boot flows that encounter a single problematic opcode.
+  public readonly reservedSkipAtPCs = new Set<number>();
+  public addReservedSkipPC(pc: number): void { this.reservedSkipAtPCs.add((pc >>> 0)); }
+  private reservedSkipActive(): boolean {
+    // Consider skipping if global fastboot is enabled OR this instruction's PC is in the targeted skip set.
+    const pcNow = this.lastInstrPC >>> 0;
+    return this.fastbootSkipReserved || this.reservedSkipAtPCs.has(pcNow);
+  }
 
   // Minimal CP0 for exception state
   readonly cop0 = new Cop0();
@@ -230,8 +241,8 @@ export class CPU {
     // Emit trace for this instruction fetch
     if (this.onTrace) { try { this.onTrace(instrPC >>> 0, instr >>> 0); } catch {} }
 
-    // Fastboot-HLE: auto-return from empty exception vector loops
-    if (this.fastbootSkipReserved) {
+    // Fastboot-HLE or explicit: auto-return from empty exception vector loops
+    if (this.fastbootSkipReserved || this.vectorAutoReturn) {
       const status0 = this.cop0.read(12) >>> 0;
       const inVec = (instrPC >>> 0) >= 0x80000180 && (instrPC >>> 0) < 0x80001000;
       if (inVec && ((instr >>> 0) === 0)) {
@@ -925,8 +936,8 @@ export class CPU {
           default:
             // Unknown SPECIAL funct
             this.warnDecode('special_reserved', `special_funct_0x${funct.toString(16)}`, { funct: funct >>> 0 });
-            // Treat unknown R-type as ReservedInstruction (or skip in fastboot)
-            if (this.fastbootSkipReserved) return;
+            // Treat unknown R-type as ReservedInstruction (or skip via fastboot or targeted PC list)
+            if (this.reservedSkipActive()) return;
             throw new CPUException('ReservedInstruction', this.pc >>> 0);
         }
       }
@@ -1141,8 +1152,8 @@ export class CPU {
           default:
             // Unknown REGIMM variant
             this.warnDecode('regimm_unknown_rt', `regimm_rt_0x${rtField.toString(16)}`, { rt: rtField >>> 0 });
-            // Treat unknown REGIMM variant as ReservedInstruction (or skip in fastboot)
-            if (this.fastbootSkipReserved) return;
+            // Treat unknown REGIMM variant as ReservedInstruction (or skip via fastboot or targeted PC list)
+            if (this.reservedSkipActive()) return;
             throw new CPUException('ReservedInstruction', this.pc >>> 0);
         }
       }
@@ -1461,6 +1472,7 @@ export class CPU {
         const exl0 = (status0 & Cop0.STATUS_EXL) !== 0;
         const ksu0 = (status0 >>> 3) & 0x3;
         if (!exl0 && ksu0 === 2) {
+          if (this.reservedSkipActive()) { this.warnDecode('cop0_priv_suppressed', 'cop0_privilege_in_user', { pc: this.lastInstrPC>>>0 }); return; }
           throw new CPUException('ReservedInstruction', 0);
         }
         const rsField = rs;
@@ -1478,6 +1490,7 @@ export class CPU {
               // If not in exception level, raise reserved instruction
               const status0 = this.cop0.read(12) >>> 0;
               if ((status0 & Cop0.STATUS_EXL) === 0) {
+                if (this.reservedSkipActive()) { this.warnDecode('eret_outside_exl_suppressed', 'eret_outside_exl', { pc: this.lastInstrPC>>>0 }); return; }
                 throw new CPUException('ReservedInstruction', 0);
               }
               // Clear EXL, set PC to EPC
@@ -1537,8 +1550,8 @@ export class CPU {
         default:
           // Unknown COP0 rs group
           this.warnDecode('cop0_unknown_rs', `cop0_rs_0x${rsField.toString(16)}`, { rs: rsField >>> 0 });
-          // Treat unimplemented COP0 variants as ReservedInstruction (or skip in fastboot)
-          if (this.fastbootSkipReserved) return;
+          // Treat unimplemented COP0 variants as ReservedInstruction (or skip via fastboot or targeted PC list)
+          if (this.reservedSkipActive()) return;
           throw new CPUException('ReservedInstruction', this.pc >>> 0);
       }
     }
@@ -1716,8 +1729,8 @@ export class CPU {
       default:
         // Unknown major opcode: warn once
         this.warnDecode('opcode_reserved', `op_0x${op.toString(16)}`, { op: op >>> 0 });
-        // Unknown major opcode -> ReservedInstruction exception (or skip in fastboot)
-        if (this.fastbootSkipReserved) return;
+        // Unknown major opcode -> ReservedInstruction exception (or skip via fastboot or targeted PC list)
+        if (this.reservedSkipActive()) return;
         throw new CPUException('ReservedInstruction', this.pc >>> 0);
     }
   }
