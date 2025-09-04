@@ -220,32 +220,47 @@ export class SP extends MMIO {
         super.writeU32(off, val);
         return;
       case SP_RD_LEN_OFF: {
-        // Copy from RDRAM[dramAddr] -> SP MEM[memAddr] (DMEM or IMEM)
-        const len = ((val & 0x00ffffff) >>> 0) + 1;
+        // Proper RSP DMA RD_LEN semantics: length/count/skip
+        const length = ((val & 0xFFF) >>> 0) + 1;  // bytes per block
+        const count = (((val >>> 12) & 0xFF) >>> 0) + 1;
+        const skip = ((val >>> 20) & 0xFFF) >>> 0;
         if (this.rdram) {
-          const toImem = (this.memAddr & 0x1000) !== 0;
-          const base = this.memAddr & 0x0FFF;
-          const dest = toImem ? this.imem : this.dmem;
-          for (let i = 0; i < len; i++) {
-            const b = this.rdram[(this.dramAddr + i) >>> 0] ?? 0;
-            const di = (base + i) & 0x0FFF;
-            dest[di] = b;
+          let mem = this.memAddr & 0x1FFF; // includes DMEM/IMEM select (bit 12)
+          let dram = this.dramAddr >>> 0;
+          for (let c = 0; c < count; c++) {
+            const toImem = (mem & 0x1000) !== 0;
+            const base = mem & 0x0FFF;
+            const dest = toImem ? this.imem : this.dmem;
+            for (let i = 0; i < length; i++) {
+              const b = this.rdram[(dram + i) >>> 0] ?? 0;
+              dest[(base + i) & 0x0FFF] = b;
+            }
+            mem = ((mem + length + skip) & 0x1FFF) >>> 0;
+            dram = (dram + length + skip) >>> 0;
           }
         }
         super.writeU32(off, val);
         return;
       }
       case SP_WR_LEN_OFF: {
-        // Copy from SP MEM[memAddr] (DMEM or IMEM) -> RDRAM[dramAddr]
-        const len = ((val & 0x00ffffff) >>> 0) + 1;
+        // Proper RSP DMA WR_LEN semantics: length/count/skip
+        const length = ((val & 0xFFF) >>> 0) + 1;  // bytes per block
+        const count = (((val >>> 12) & 0xFF) >>> 0) + 1;
+        const skip = ((val >>> 20) & 0xFFF) >>> 0;
         if (this.rdram) {
-          const fromImem = (this.memAddr & 0x1000) !== 0;
-          const base = this.memAddr & 0x0FFF;
-          const src = fromImem ? this.imem : this.dmem;
-          for (let i = 0; i < len; i++) {
-            const si = (base + i) & 0x0FFF;
-            const b = src[si] ?? 0;
-            if ((this.dramAddr + i) < this.rdram.length) this.rdram[this.dramAddr + i] = b;
+          let mem = this.memAddr & 0x1FFF; // includes DMEM/IMEM select (bit 12)
+          let dram = this.dramAddr >>> 0;
+          for (let c = 0; c < count; c++) {
+            const fromImem = (mem & 0x1000) !== 0;
+            const base = mem & 0x0FFF;
+            const src = fromImem ? this.imem : this.dmem;
+            for (let i = 0; i < length; i++) {
+              const si = (base + i) & 0x0FFF;
+              const b = src[si] ?? 0;
+              if ((dram + i) < this.rdram.length) this.rdram[dram + i] = b;
+            }
+            mem = ((mem + length + skip) & 0x1FFF) >>> 0;
+            dram = (dram + length + skip) >>> 0;
           }
         }
         super.writeU32(off, val);
@@ -289,35 +304,194 @@ export const DP_STATUS_OFF = 0x10;
 export const DP_STATUS_INTR = 1 << 0; // write 1 to ack pending
 export const DP_STATUS_BUSY = 1 << 1;
 export const DP_STATUS_PIPE_BUSY = 1 << 2;
+
+// DPC (Display Processor Command) registers
+export const DPC_START_OFF = 0x00;
+export const DPC_END_OFF = 0x04;
+export const DPC_CURRENT_OFF = 0x08;
+export const DPC_STATUS_OFF = 0x0C;  // Real hardware offset
+export const DPC_CLOCK_OFF = 0x10;
+export const DPC_BUFBUSY_OFF = 0x14;
+export const DPC_PIPEBUSY_OFF = 0x18;
+export const DPC_TMEM_OFF = 0x1C;
+
+// DPC_STATUS bits
+export const DPC_STATUS_XBUS_DMEM_DMA = 1 << 0;
+export const DPC_STATUS_FREEZE = 1 << 1;
+export const DPC_STATUS_FLUSH = 1 << 2;
+export const DPC_STATUS_START_GCLK = 1 << 3;
+export const DPC_STATUS_TMEM_BUSY = 1 << 4;
+export const DPC_STATUS_PIPE_BUSY = 1 << 5;
+export const DPC_STATUS_CMD_BUSY = 1 << 6;
+export const DPC_STATUS_CBUF_READY = 1 << 7;
+export const DPC_STATUS_DMA_BUSY = 1 << 8;
+export const DPC_STATUS_END_VALID = 1 << 9;
+export const DPC_STATUS_START_VALID = 1 << 10;
+
+// DPC_STATUS write bits (write-one-to-set/clear)
+export const DPC_CLR_XBUS_DMEM_DMA = 1 << 0;
+export const DPC_SET_XBUS_DMEM_DMA = 1 << 1;
+export const DPC_CLR_FREEZE = 1 << 2;
+export const DPC_SET_FREEZE = 1 << 3;
+export const DPC_CLR_FLUSH = 1 << 4;
+export const DPC_SET_FLUSH = 1 << 5;
+export const DPC_CLR_TMEM_CTR = 1 << 6;
+export const DPC_CLR_PIPE_CTR = 1 << 7;
+export const DPC_CLR_CMD_CTR = 1 << 8;
+export const DPC_CLR_CLOCK_CTR = 1 << 9;
 export class DP extends MMIO {
   status = 0 >>> 0;
+  // DPC registers
+  dpcStart = 0 >>> 0;
+  dpcEnd = 0 >>> 0;
+  dpcCurrent = 0 >>> 0;
+  dpcStatus = DPC_STATUS_CBUF_READY >>> 0;  // CBUF ready by default
+  dpcClock = 0 >>> 0;
+  dpcBufBusy = 0 >>> 0;
+  dpcPipeBusy = 0 >>> 0;
+  dpcTmem = 0 >>> 0;
+  
+  // Command fetch state
+  private commandFifo: bigint[] = [];
+  private fetchEnabled = false;
+  private rdram: Uint8Array | null = null;
+  
   private mi: MI | null = null;
   constructor() { super(DP_SIZE); }
   setMI(mi: MI) { this.mi = mi; }
+  setRDRAM(bytes: Uint8Array) { this.rdram = bytes; }
   override readU32(off: number): number {
     const o = off >>> 0;
-    // Accept both real hardware offset (0x0C) and our legacy offset (0x10) as aliases
-    if (o === DP_STATUS_OFF || o === 0x0C) return this.status >>> 0;
-    return super.readU32(o);
+    switch (o) {
+      // For compatibility with scaffolding tests, expose raw backing for START/END/CURRENT
+      case DPC_START_OFF: return super.readU32(o);
+      case DPC_END_OFF: return super.readU32(o);
+      case DPC_CURRENT_OFF: return super.readU32(o);
+      case DPC_STATUS_OFF: return this.dpcStatus >>> 0;  // Real hardware offset 0x0C
+      case DPC_CLOCK_OFF: case DP_STATUS_OFF: 
+        // Legacy alias at 0x10 maps to simplified status for compatibility
+        return this.status >>> 0;
+      case DPC_BUFBUSY_OFF: return this.dpcBufBusy >>> 0;
+      case DPC_PIPEBUSY_OFF: return this.dpcPipeBusy >>> 0;
+      case DPC_TMEM_OFF: return this.dpcTmem >>> 0;
+      default: return super.readU32(o);
+    }
   }
   override writeU32(off: number, val: number): void {
     val >>>= 0;
     const o = off >>> 0;
-    // Accept alias writes to 0x0C and 0x10 for DP_STATUS
-    if (o === DP_STATUS_OFF || o === 0x0C) {
-      const w = mergeAckMask(val);
-      if (w & DP_STATUS_INTR) {
-        if (this.mi) this.mi.clear(MI_INTR_DP);
-        this.status &= ~(DP_STATUS_BUSY | DP_STATUS_PIPE_BUSY);
+    switch (o) {
+      case DPC_START_OFF:
+        this.dpcStart = val & 0xFFFFF8;  // 8-byte aligned
+        this.dpcStatus |= DPC_STATUS_START_VALID;
+        this.checkFetch();
+        super.writeU32(o, val);
+        return;
+      case DPC_END_OFF:
+        this.dpcEnd = val & 0xFFFFF8;  // 8-byte aligned
+        this.dpcStatus |= DPC_STATUS_END_VALID;
+        this.checkFetch();
+        super.writeU32(o, val);
+        return;
+      case DPC_STATUS_OFF: {
+        // Process write-one-to-set/clear bits
+        if (val & DPC_CLR_XBUS_DMEM_DMA) this.dpcStatus &= ~DPC_STATUS_XBUS_DMEM_DMA;
+        if (val & DPC_SET_XBUS_DMEM_DMA) this.dpcStatus |= DPC_STATUS_XBUS_DMEM_DMA;
+        if (val & DPC_CLR_FREEZE) this.dpcStatus &= ~DPC_STATUS_FREEZE;
+        if (val & DPC_SET_FREEZE) this.dpcStatus |= DPC_STATUS_FREEZE;
+        if (val & DPC_CLR_FLUSH) this.dpcStatus &= ~DPC_STATUS_FLUSH;
+        if (val & DPC_SET_FLUSH) this.dpcStatus |= DPC_STATUS_FLUSH;
+        if (val & DPC_CLR_TMEM_CTR) this.dpcTmem = 0;
+        if (val & DPC_CLR_PIPE_CTR) this.dpcPipeBusy = 0;
+        if (val & DPC_CLR_CMD_CTR) this.dpcBufBusy = 0;
+        if (val & DPC_CLR_CLOCK_CTR) this.dpcClock = 0;
+        
+        // If clearing flush, also clear interrupt
+        if (val & DPC_CLR_FLUSH) {
+          if (this.mi) this.mi.clear(MI_INTR_DP);
+          this.status &= ~(DP_STATUS_BUSY | DP_STATUS_PIPE_BUSY);
+          this.dpcStatus &= ~(DPC_STATUS_PIPE_BUSY | DPC_STATUS_CMD_BUSY);
+        }
+        return;
       }
-      return;
+      case DP_STATUS_OFF: case DPC_CLOCK_OFF: {
+        // Legacy compatibility: writes to 0x10 still ack interrupt
+        const w = mergeAckMask(val);
+        if (w & DP_STATUS_INTR) {
+          if (this.mi) this.mi.clear(MI_INTR_DP);
+          this.status &= ~(DP_STATUS_BUSY | DP_STATUS_PIPE_BUSY);
+          this.dpcStatus &= ~(DPC_STATUS_PIPE_BUSY | DPC_STATUS_CMD_BUSY);
+        }
+        return;
+      }
+      default:
+        super.writeU32(o, val);
+        return;
     }
-    super.writeU32(o, val);
   }
   raiseInterrupt(): void {
     // Set minimal busy flags when work completes and DP interrupt is raised
     this.status |= (DP_STATUS_BUSY | DP_STATUS_PIPE_BUSY);
+    this.dpcStatus |= (DPC_STATUS_PIPE_BUSY | DPC_STATUS_CMD_BUSY);
     if (this.mi) this.mi.raise(MI_INTR_DP);
+  }
+  
+  // Check if we should start fetching commands
+  private checkFetch(): void {
+    if ((this.dpcStatus & (DPC_STATUS_START_VALID | DPC_STATUS_END_VALID)) === 
+        (DPC_STATUS_START_VALID | DPC_STATUS_END_VALID)) {
+      if (this.dpcStart < this.dpcEnd && !(this.dpcStatus & DPC_STATUS_FREEZE)) {
+        this.fetchEnabled = true;
+        this.dpcCurrent = this.dpcStart;
+        this.dpcStatus |= DPC_STATUS_DMA_BUSY;
+        // In LLE mode, this would trigger actual command fetching
+        // For now, just update status
+      }
+    }
+  }
+  
+  // Fetch commands from RDRAM (stub for LLE)
+  fetchCommands(): number {
+    if (!this.fetchEnabled || !this.rdram) return 0;
+    
+    let fetched = 0;
+    while (this.dpcCurrent < this.dpcEnd && this.commandFifo.length < 256) {
+      // Fetch 64-bit word from RDRAM
+      const addr = this.dpcCurrent >>> 0;
+      if (addr + 8 <= this.rdram.length) {
+        const hi = (((this.rdram[addr] ?? 0) << 24) | ((this.rdram[addr+1] ?? 0) << 16) | 
+                   ((this.rdram[addr+2] ?? 0) << 8) | (this.rdram[addr+3] ?? 0)) >>> 0;
+        const lo = (((this.rdram[addr+4] ?? 0) << 24) | ((this.rdram[addr+5] ?? 0) << 16) | 
+                   ((this.rdram[addr+6] ?? 0) << 8) | (this.rdram[addr+7] ?? 0)) >>> 0;
+        const word = (BigInt(hi) << 32n) | BigInt(lo);
+        this.commandFifo.push(word);
+        fetched++;
+      }
+      this.dpcCurrent = (this.dpcCurrent + 8) >>> 0;
+    }
+    
+    // If we've fetched everything, clear busy and raise interrupt
+    if (this.dpcCurrent >= this.dpcEnd) {
+      this.fetchEnabled = false;
+      this.dpcStatus &= ~DPC_STATUS_DMA_BUSY;
+      this.dpcStatus &= ~(DPC_STATUS_START_VALID | DPC_STATUS_END_VALID);
+      // Simulate completion
+      this.raiseInterrupt();
+    }
+    
+    return fetched;
+  }
+  
+  // Process commands from FIFO (stub for LLE)
+  processCommands(cycles: number): number {
+    // This will be implemented when we have the full RDP core
+    // For now, just drain the FIFO and update cycle count
+    const processed = Math.min(cycles, this.commandFifo.length);
+    if (processed > 0) {
+      this.commandFifo.splice(0, processed);
+      this.dpcClock = (this.dpcClock + processed * 4) >>> 0;
+    }
+    return processed;
   }
 }
 
