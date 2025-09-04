@@ -1,0 +1,19 @@
+{
+  "rom": "/Users/mattias800/temp/ai-n64-gpt5/mario64.z64",
+  "video": { "width": 320, "height": 240, "origin": "0xF000" },
+  "timing": { "start": 2, "interval": 3, "frames": 2, "spOffset": 1 },
+  "bg": { "start5551": "0x001F", "end5551": "0x07FF" },
+  "allocBase": "0x30000",
+  "stagingBase": "0x40000",
+  "strideWords": 256,
+  "layout": { "offsetPerFrameX": 1 },
+  "assets": {
+    "loads": [
+      { "kind": "rom",  "srcRom": "0x00108A40", "dest": "0x31000", "length": "0x00001000" },
+      { "kind": "mio0", "srcRom": "0x00108A40", "dest": "0x32000" }
+    ],
+    "tiles": [
+      { "format": "CI8", "tlutAddr": "0x31000", "tlutCount": 256, "pixAddr": "0x32000", "w": 128, "h": 64, "x": 96, "y": 88 }
+    ]
+  }
+}

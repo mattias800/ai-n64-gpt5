@@ -1347,6 +1347,11 @@ export class CPU {
         return;
       }
       case 0x31: { // LWC1 ft, offset(base)
+        // Gate COP1 usage by Status.CU1; if disabled, raise Coprocessor Unusable
+        const status0 = this.cop0.read(12) >>> 0;
+        if ((status0 & Cop0.STATUS_CU1) === 0) {
+          throw new CPUException('CoprocessorUnusable', 0);
+        }
         const addr = this.addrCalc(rs, imm);
         // ft encoded in rt field
         const v = this.loadU32TLB(addr);
@@ -1354,6 +1359,11 @@ export class CPU {
         return;
       }
       case 0x35: { // LDC1 ft, offset(base) - load 64-bit into ft(ft+1)
+        // Gate COP1 usage by Status.CU1; if disabled, raise Coprocessor Unusable
+        const status0 = this.cop0.read(12) >>> 0;
+        if ((status0 & Cop0.STATUS_CU1) === 0) {
+          throw new CPUException('CoprocessorUnusable', 0);
+        }
         const addr = this.addrCalc(rs, imm) >>> 0;
         const p = addr & ~7;
         const b0 = this.loadU8TLB(p + 0) & 0xff;
@@ -1374,12 +1384,22 @@ export class CPU {
         return;
       }
       case 0x39: { // SWC1 ft, offset(base)
+        // Gate COP1 usage by Status.CU1; if disabled, raise Coprocessor Unusable
+        const status0 = this.cop0.read(12) >>> 0;
+        if ((status0 & Cop0.STATUS_CU1) === 0) {
+          throw new CPUException('CoprocessorUnusable', 0);
+        }
         const addr = this.addrCalc(rs, imm);
         const v = (rt >>> 0) < 32 ? ((this.fpr[rt] ?? 0) >>> 0) : 0;
         this.storeU32TLB(addr, v >>> 0);
         return;
       }
       case 0x3d: { // SDC1 ft, offset(base) - store 64-bit from ft(ft+1)
+        // Gate COP1 usage by Status.CU1; if disabled, raise Coprocessor Unusable
+        const status0 = this.cop0.read(12) >>> 0;
+        if ((status0 & Cop0.STATUS_CU1) === 0) {
+          throw new CPUException('CoprocessorUnusable', 0);
+        }
         const addr = this.addrCalc(rs, imm) >>> 0;
         const p = addr & ~7;
         const ft = rt >>> 0;
