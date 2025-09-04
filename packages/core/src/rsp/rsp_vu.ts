@@ -803,13 +803,14 @@ export class RspVectorUnit {
     const reg = this.vregs[vt & 0x1F];
     if (!reg) return;
     
-    // Calculate start position (loads from right)
-    const start = 16 - ((offset & 0xF) - e);
-    const bytes = Math.min(16 - e, 16 - (offset & 0xF));
+    // LRV loads data from memory to the beginning of the vector
+    // The number of bytes loaded depends on the address alignment
+    // For address 0x1A4 with element 0, it loads 12 bytes (0x1A4 to 0x1AF)
+    const bytes = 16 - (offset & 0xF);  // How many bytes to end of 16-byte line
     
-    for (let i = 0; i < bytes; i += 2) {
-      const elemIdx = (start + i) >> 1;
-      if (elemIdx >= 0 && elemIdx < 8) {
+    for (let i = 0; i < bytes && i < 16 - e; i += 2) {
+      const elemIdx = (e + i) >> 1;
+      if (elemIdx < 8) {
         const off = offset + i;
         reg[elemIdx] = ((dmem[off] ?? 0) << 8) | (dmem[off + 1] ?? 0);
       }
@@ -871,13 +872,16 @@ export class RspVectorUnit {
    * SDV - Store Double from Vector (64-bit)
    */
   sdv(vt: number, element: number, addr: number, dmem: Uint8Array): void {
-    const e = (element >> 3) & 0x4;
+    // Element 8 should align to lane 4 (element >> 1)
+    const e = (element >> 1) & 0x7;
     const offset = addr & 0xFF8;
     const reg = this.vregs[vt & 0x1F];
     if (!reg) return;
     
+    // Store starting from element e, wrapping around
     for (let i = 0; i < 4; i++) {
-      const value = reg[e + i] ?? 0;
+      const elemIdx = (e + i) & 0x7;
+      const value = reg[elemIdx] ?? 0;
       const off = offset + (i * 2);
       dmem[off] = (value >> 8) & 0xFF;
       dmem[off + 1] = value & 0xFF;
@@ -917,13 +921,13 @@ export class RspVectorUnit {
     const reg = this.vregs[vt & 0x1F];
     if (!reg) return;
     
-    // Calculate start position (stores from right)
-    const start = 16 - ((offset & 0xF) - e);
-    const bytes = Math.min(16 - e, 16 - (offset & 0xF));
+    // SRV stores data from the beginning of the vector to memory
+    // The number of bytes stored depends on the address alignment
+    const bytes = 16 - (offset & 0xF);  // How many bytes to end of 16-byte line
     
-    for (let i = 0; i < bytes; i += 2) {
-      const elemIdx = (start + i) >> 1;
-      if (elemIdx >= 0 && elemIdx < 8) {
+    for (let i = 0; i < bytes && i < 16 - e; i += 2) {
+      const elemIdx = (e + i) >> 1;
+      if (elemIdx < 8) {
         const value = reg[elemIdx] ?? 0;
         const off = offset + i;
         dmem[off] = (value >> 8) & 0xFF;

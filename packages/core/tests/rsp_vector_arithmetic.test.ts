@@ -237,26 +237,27 @@ describe('RSP Vector Unit - Arithmetic Operations', () => {
       vu.writeVReg(7, v2);
       
       // Set VCC flags for merge selection
-      vu.setVCC(0, false);  // Select from vs
-      vu.setVCC(1, true);   // Select from vt
-      vu.setVCC(2, false);  // Select from vs
-      vu.setVCC(3, true);   // Select from vt
-      vu.setVCC(4, true);   // Select from vt
-      vu.setVCC(5, false);  // Select from vs
-      vu.setVCC(6, true);   // Select from vt
-      vu.setVCC(7, false);  // Select from vs
+      // VCC[i]=0 selects from vt, VCC[i]=1 selects from vs
+      vu.setVCC(0, false);  // Select from vt
+      vu.setVCC(1, true);   // Select from vs
+      vu.setVCC(2, false);  // Select from vt
+      vu.setVCC(3, true);   // Select from vs
+      vu.setVCC(4, true);   // Select from vs
+      vu.setVCC(5, false);  // Select from vt
+      vu.setVCC(6, true);   // Select from vs
+      vu.setVCC(7, false);  // Select from vt
       
       vu.vmrg(8, 6, 7);
       
       const result = vu.readVReg(8) as Int16Array;
-      expect(result[0]).toBe(10);  // From vs
-      expect(result[1]).toBe(21);  // From vt
-      expect(result[2]).toBe(30);  // From vs
-      expect(result[3]).toBe(41);  // From vt
-      expect(result[4]).toBe(51);  // From vt
-      expect(result[5]).toBe(60);  // From vs
-      expect(result[6]).toBe(71);  // From vt
-      expect(result[7]).toBe(80);  // From vs
+      expect(result[0]).toBe(11);  // From vt (VCC[0]=0)
+      expect(result[1]).toBe(20);  // From vs (VCC[1]=1)
+      expect(result[2]).toBe(31);  // From vt (VCC[2]=0)
+      expect(result[3]).toBe(40);  // From vs (VCC[3]=1)
+      expect(result[4]).toBe(50);  // From vs (VCC[4]=1)
+      expect(result[5]).toBe(61);  // From vt (VCC[5]=0)
+      expect(result[6]).toBe(70);  // From vs (VCC[6]=1)
+      expect(result[7]).toBe(81);  // From vt (VCC[7]=0)
       
       // VCC and VCO should be cleared after merge
       expect(vu.getVCCMask()).toBe(0);
