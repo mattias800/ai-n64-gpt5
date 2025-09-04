@@ -431,10 +431,10 @@ export class GraphicsPipeline {
   
   private transformPoint(matrix: Matrix4x4, point: { x: number; y: number; z: number; w: number }): { x: number; y: number; z: number; w: number } {
     return {
-      x: matrix.m[0][0] * point.x + matrix.m[0][1] * point.y + matrix.m[0][2] * point.z + matrix.m[0][3] * point.w,
-      y: matrix.m[1][0] * point.x + matrix.m[1][1] * point.y + matrix.m[1][2] * point.z + matrix.m[1][3] * point.w,
-      z: matrix.m[2][0] * point.x + matrix.m[2][1] * point.y + matrix.m[2][2] * point.z + matrix.m[2][3] * point.w,
-      w: matrix.m[3][0] * point.x + matrix.m[3][1] * point.y + matrix.m[3][2] * point.z + matrix.m[3][3] * point.w
+      x: matrix.m[0]![0]! * point.x + matrix.m[0]![1]! * point.y + matrix.m[0]![2]! * point.z + matrix.m[0]![3]! * point.w,
+      y: matrix.m[1]![0]! * point.x + matrix.m[1]![1]! * point.y + matrix.m[1]![2]! * point.z + matrix.m[1]![3]! * point.w,
+      z: matrix.m[2]![0]! * point.x + matrix.m[2]![1]! * point.y + matrix.m[2]![2]! * point.z + matrix.m[2]![3]! * point.w,
+      w: matrix.m[3]![0]! * point.x + matrix.m[3]![1]! * point.y + matrix.m[3]![2]! * point.z + matrix.m[3]![3]! * point.w
     };
   }
   
@@ -468,7 +468,7 @@ export class GraphicsPipeline {
     for (let i = 0; i < 4; i++) {
       for (let j = 0; j < 4; j++) {
         for (let k = 0; k < 4; k++) {
-          result.m[i][j] += a.m[i][k] * b.m[k][j];
+          result.m[i]![j]! += a.m[i]![k]! * b.m[k]![j]!;
         }
       }
     }
@@ -484,7 +484,7 @@ export class GraphicsPipeline {
       for (let j = 0; j < 4; j++) {
         const intPart = bus.loadS16(address + (i * 8 + j * 2) * 2);
         const fracPart = bus.loadU16(address + (i * 8 + j * 2) * 2 + 2);
-        matrix.m[i][j] = intPart + fracPart / 65536.0;
+        matrix.m[i]![j]! = intPart + fracPart / 65536.0;
       }
     }
     
@@ -494,7 +494,7 @@ export class GraphicsPipeline {
   private segmentedToPhysical(segAddr: number): number {
     const segment = (segAddr >> 24) & 0x0F;
     const offset = segAddr & 0x00FFFFFF;
-    return this.segmentTable[segment] + offset;
+    return this.segmentTable[segment]! + offset;
   }
   
   /**

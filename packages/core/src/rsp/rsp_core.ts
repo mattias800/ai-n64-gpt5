@@ -517,24 +517,24 @@ export class RspCore implements IRspCore {
     
     switch (rt) {
       case 0x00: // BLTZ
-        if ((this.st.gpr[rs] | 0) < 0) {
+        if (((this.st.gpr[rs] ?? 0) | 0) < 0) {
           this.st.nextPc = (this.st.pc + (imm << 2)) & 0xFFF;
         }
         break;
       case 0x01: // BGEZ
-        if ((this.st.gpr[rs] | 0) >= 0) {
+        if (((this.st.gpr[rs] ?? 0) | 0) >= 0) {
           this.st.nextPc = (this.st.pc + (imm << 2)) & 0xFFF;
         }
         break;
       case 0x10: // BLTZAL
         this.st.gpr[31] = (this.st.pc + 4) & 0xFFF;
-        if ((this.st.gpr[rs] | 0) < 0) {
+        if (((this.st.gpr[rs] ?? 0) | 0) < 0) {
           this.st.nextPc = (this.st.pc + (imm << 2)) & 0xFFF;
         }
         break;
       case 0x11: // BGEZAL
         this.st.gpr[31] = (this.st.pc + 4) & 0xFFF;
-        if ((this.st.gpr[rs] | 0) >= 0) {
+        if (((this.st.gpr[rs] ?? 0) | 0) >= 0) {
           this.st.nextPc = (this.st.pc + (imm << 2)) & 0xFFF;
         }
         break;
@@ -576,7 +576,7 @@ export class RspCore implements IRspCore {
     const rs = (instr >>> 21) & 0x1F;
     const imm = (instr << 16) >> 16;
     
-    if ((this.st.gpr[rs] | 0) <= 0) {
+    if (((this.st.gpr[rs] ?? 0) | 0) <= 0) {
       this.st.nextPc = (this.st.pc + (imm << 2)) & 0xFFF;
     }
   }
@@ -585,7 +585,7 @@ export class RspCore implements IRspCore {
     const rs = (instr >>> 21) & 0x1F;
     const imm = (instr << 16) >> 16;
     
-    if ((this.st.gpr[rs] | 0) > 0) {
+    if (((this.st.gpr[rs] ?? 0) | 0) > 0) {
       this.st.nextPc = (this.st.pc + (imm << 2)) & 0xFFF;
     }
   }
@@ -594,7 +594,7 @@ export class RspCore implements IRspCore {
     const rs = (instr >>> 21) & 0x1F;
     const rt = (instr >>> 16) & 0x1F;
     const imm = (instr << 16) >> 16;
-    this.st.gpr[rt] = (this.st.gpr[rs] + imm) >>> 0;
+    this.st.gpr[rt] = ((this.st.gpr[rs] ?? 0) + imm) >>> 0;
     if (rt === 0) this.st.gpr[0] = 0;
   }
   
@@ -602,7 +602,7 @@ export class RspCore implements IRspCore {
     const rs = (instr >>> 21) & 0x1F;
     const rt = (instr >>> 16) & 0x1F;
     const imm = (instr << 16) >> 16;
-    this.st.gpr[rt] = (this.st.gpr[rs] + imm) >>> 0;
+    this.st.gpr[rt] = ((this.st.gpr[rs] ?? 0) + imm) >>> 0;
     if (rt === 0) this.st.gpr[0] = 0;
   }
   
@@ -610,7 +610,7 @@ export class RspCore implements IRspCore {
     const rs = (instr >>> 21) & 0x1F;
     const rt = (instr >>> 16) & 0x1F;
     const imm = (instr << 16) >> 16;
-    this.st.gpr[rt] = ((this.st.gpr[rs] | 0) < imm) ? 1 : 0;
+    this.st.gpr[rt] = (((this.st.gpr[rs] ?? 0) | 0) < imm) ? 1 : 0;
     if (rt === 0) this.st.gpr[0] = 0;
   }
   
@@ -618,7 +618,7 @@ export class RspCore implements IRspCore {
     const rs = (instr >>> 21) & 0x1F;
     const rt = (instr >>> 16) & 0x1F;
     const imm = (instr << 16) >> 16;
-    this.st.gpr[rt] = ((this.st.gpr[rs] >>> 0) < (imm >>> 0)) ? 1 : 0;
+    this.st.gpr[rt] = (((this.st.gpr[rs] ?? 0) >>> 0) < (imm >>> 0)) ? 1 : 0;
     if (rt === 0) this.st.gpr[0] = 0;
   }
   
@@ -626,7 +626,7 @@ export class RspCore implements IRspCore {
     const rs = (instr >>> 21) & 0x1F;
     const rt = (instr >>> 16) & 0x1F;
     const imm = instr & 0xFFFF;
-    this.st.gpr[rt] = this.st.gpr[rs] & imm;
+    this.st.gpr[rt] = (this.st.gpr[rs] ?? 0) & imm;
     if (rt === 0) this.st.gpr[0] = 0;
   }
   
@@ -634,7 +634,7 @@ export class RspCore implements IRspCore {
     const rs = (instr >>> 21) & 0x1F;
     const rt = (instr >>> 16) & 0x1F;
     const imm = instr & 0xFFFF;
-    this.st.gpr[rt] = this.st.gpr[rs] | imm;
+    this.st.gpr[rt] = (this.st.gpr[rs] ?? 0) | imm;
     if (rt === 0) this.st.gpr[0] = 0;
   }
   
@@ -642,7 +642,7 @@ export class RspCore implements IRspCore {
     const rs = (instr >>> 21) & 0x1F;
     const rt = (instr >>> 16) & 0x1F;
     const imm = instr & 0xFFFF;
-    this.st.gpr[rt] = this.st.gpr[rs] ^ imm;
+    this.st.gpr[rt] = (this.st.gpr[rs] ?? 0) ^ imm;
     if (rt === 0) this.st.gpr[0] = 0;
   }
   
@@ -664,7 +664,7 @@ export class RspCore implements IRspCore {
         if (rt === 0) this.st.gpr[0] = 0;
         break;
       case 0x04: // MTC0
-        this.mtc0(rd, this.st.gpr[rt]);
+        this.mtc0(rd, this.st.gpr[rt] ?? 0);
         break;
     }
   }
@@ -678,8 +678,8 @@ export class RspCore implements IRspCore {
     const rs = (instr >>> 21) & 0x1F;
     const rt = (instr >>> 16) & 0x1F;
     const imm = (instr << 16) >> 16;
-    const addr = (this.st.gpr[rs] + imm) & 0xFFF;
-    this.st.gpr[rt] = (this.dmem[addr] << 24) >> 24; // Sign extend
+    const addr = ((this.st.gpr[rs] ?? 0) + imm) & 0xFFF;
+    this.st.gpr[rt] = ((this.dmem[addr] ?? 0) << 24) >> 24; // Sign extend
     if (rt === 0) this.st.gpr[0] = 0;
   }
   
@@ -687,8 +687,8 @@ export class RspCore implements IRspCore {
     const rs = (instr >>> 21) & 0x1F;
     const rt = (instr >>> 16) & 0x1F;
     const imm = (instr << 16) >> 16;
-    const addr = (this.st.gpr[rs] + imm) & 0xFFE;
-    const val = (this.dmem[addr] << 8) | this.dmem[addr + 1];
+    const addr = ((this.st.gpr[rs] ?? 0) + imm) & 0xFFE;
+    const val = ((this.dmem[addr] ?? 0) << 8) | (this.dmem[addr + 1] ?? 0);
     this.st.gpr[rt] = (val << 16) >> 16; // Sign extend
     if (rt === 0) this.st.gpr[0] = 0;
   }
@@ -697,9 +697,9 @@ export class RspCore implements IRspCore {
     const rs = (instr >>> 21) & 0x1F;
     const rt = (instr >>> 16) & 0x1F;
     const imm = (instr << 16) >> 16;
-    const addr = (this.st.gpr[rs] + imm) & 0xFFC;
-    this.st.gpr[rt] = ((this.dmem[addr] << 24) | (this.dmem[addr + 1] << 16) |
-                       (this.dmem[addr + 2] << 8) | this.dmem[addr + 3]) >>> 0;
+    const addr = ((this.st.gpr[rs] ?? 0) + imm) & 0xFFC;
+    this.st.gpr[rt] = (((this.dmem[addr] ?? 0) << 24) | ((this.dmem[addr + 1] ?? 0) << 16) |
+                       ((this.dmem[addr + 2] ?? 0) << 8) | (this.dmem[addr + 3] ?? 0)) >>> 0;
     if (rt === 0) this.st.gpr[0] = 0;
   }
   
@@ -707,8 +707,8 @@ export class RspCore implements IRspCore {
     const rs = (instr >>> 21) & 0x1F;
     const rt = (instr >>> 16) & 0x1F;
     const imm = (instr << 16) >> 16;
-    const addr = (this.st.gpr[rs] + imm) & 0xFFF;
-    this.st.gpr[rt] = this.dmem[addr] & 0xFF;
+    const addr = ((this.st.gpr[rs] ?? 0) + imm) & 0xFFF;
+    this.st.gpr[rt] = (this.dmem[addr] ?? 0) & 0xFF;
     if (rt === 0) this.st.gpr[0] = 0;
   }
   
@@ -716,8 +716,8 @@ export class RspCore implements IRspCore {
     const rs = (instr >>> 21) & 0x1F;
     const rt = (instr >>> 16) & 0x1F;
     const imm = (instr << 16) >> 16;
-    const addr = (this.st.gpr[rs] + imm) & 0xFFE;
-    this.st.gpr[rt] = ((this.dmem[addr] << 8) | this.dmem[addr + 1]) & 0xFFFF;
+    const addr = ((this.st.gpr[rs] ?? 0) + imm) & 0xFFE;
+    this.st.gpr[rt] = (((this.dmem[addr] ?? 0) << 8) | (this.dmem[addr + 1] ?? 0)) & 0xFFFF;
     if (rt === 0) this.st.gpr[0] = 0;
   }
   
@@ -725,28 +725,28 @@ export class RspCore implements IRspCore {
     const rs = (instr >>> 21) & 0x1F;
     const rt = (instr >>> 16) & 0x1F;
     const imm = (instr << 16) >> 16;
-    const addr = (this.st.gpr[rs] + imm) & 0xFFF;
-    this.dmem[addr] = this.st.gpr[rt] & 0xFF;
+    const addr = ((this.st.gpr[rs] ?? 0) + imm) & 0xFFF;
+    this.dmem[addr] = (this.st.gpr[rt] ?? 0) & 0xFF;
   }
   
   private executeSH(instr: number): void {
     const rs = (instr >>> 21) & 0x1F;
     const rt = (instr >>> 16) & 0x1F;
     const imm = (instr << 16) >> 16;
-    const addr = (this.st.gpr[rs] + imm) & 0xFFE;
-    this.dmem[addr] = (this.st.gpr[rt] >>> 8) & 0xFF;
-    this.dmem[addr + 1] = this.st.gpr[rt] & 0xFF;
+    const addr = ((this.st.gpr[rs] ?? 0) + imm) & 0xFFE;
+    this.dmem[addr] = ((this.st.gpr[rt] ?? 0) >>> 8) & 0xFF;
+    this.dmem[addr + 1] = (this.st.gpr[rt] ?? 0) & 0xFF;
   }
   
   private executeSW(instr: number): void {
     const rs = (instr >>> 21) & 0x1F;
     const rt = (instr >>> 16) & 0x1F;
     const imm = (instr << 16) >> 16;
-    const addr = (this.st.gpr[rs] + imm) & 0xFFC;
-    this.dmem[addr] = (this.st.gpr[rt] >>> 24) & 0xFF;
-    this.dmem[addr + 1] = (this.st.gpr[rt] >>> 16) & 0xFF;
-    this.dmem[addr + 2] = (this.st.gpr[rt] >>> 8) & 0xFF;
-    this.dmem[addr + 3] = this.st.gpr[rt] & 0xFF;
+    const addr = ((this.st.gpr[rs] ?? 0) + imm) & 0xFFC;
+    this.dmem[addr] = ((this.st.gpr[rt] ?? 0) >>> 24) & 0xFF;
+    this.dmem[addr + 1] = ((this.st.gpr[rt] ?? 0) >>> 16) & 0xFF;
+    this.dmem[addr + 2] = ((this.st.gpr[rt] ?? 0) >>> 8) & 0xFF;
+    this.dmem[addr + 3] = (this.st.gpr[rt] ?? 0) & 0xFF;
   }
 
   isHalted(): boolean { return this.st.halted; }

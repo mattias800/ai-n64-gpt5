@@ -17,6 +17,8 @@ export type UcCmd =
   | { op: 'DrawCI4'; w: number; h: number; addr: number; x: number; y: number }
   | { op: 'DrawPrimTri'; x1: number; y1: number; x2: number; y2: number; x3: number; y3: number }
   | { op: 'DrawPrimTriZ'; x1: number; y1: number; z1: number; x2: number; y2: number; z2: number; x3: number; y3: number; z3: number }
+  | { op: 'Draw3DTri'; x1: number; y1: number; z1: number; x2: number; y2: number; z2: number; x3: number; y3: number; z3: number; r1: number; g1: number; b1: number; r2: number; g2: number; b2: number; r3: number; g3: number; b3: number; s1: number; t1: number; s2: number; t2: number; s3: number; t3: number }
+  | { op: 'LoadMatrix'; addr: number; projection: boolean; load: boolean; push: boolean }
   | { op: 'DrawCI8Tri'; addr: number; texW: number; texH: number; x1: number; y1: number; s1: number; t1: number; x2: number; y2: number; s2: number; t2: number; x3: number; y3: number; s3: number; t3: number }
   | { op: 'DrawCI4Tri'; addr: number; texW: number; texH: number; x1: number; y1: number; s1: number; t1: number; x2: number; y2: number; s2: number; t2: number; x3: number; y3: number; s3: number; t3: number }
   | { op: 'DrawIA8Tri'; addr: number; texW: number; texH: number; x1: number; y1: number; s1: number; t1: number; x2: number; y2: number; s2: number; t2: number; x3: number; y3: number; s3: number; t3: number }
@@ -109,6 +111,25 @@ export function ucToRspdlWords(cmds: UcCmd[], strideWords: number = 64): Uint32A
           c.x2|0, c.y2|0, c.z2>>>0,
           c.x3|0, c.y3|0, c.z3>>>0,
         );
+        break;
+      case 'Draw3DTri':
+        // 3D triangle with color and texture
+        out.push(
+          0x00000060,
+          c.x1|0, c.y1|0, c.z1>>>0,
+          c.x2|0, c.y2|0, c.z2>>>0,
+          c.x3|0, c.y3|0, c.z3>>>0,
+          c.r1|0, c.g1|0, c.b1|0,
+          c.r2|0, c.g2|0, c.b2|0,
+          c.r3|0, c.g3|0, c.b3|0,
+          c.s1|0, c.t1|0,
+          c.s2|0, c.t2|0,
+          c.s3|0, c.t3|0
+        );
+        break;
+      case 'LoadMatrix':
+        // Matrix load command (placeholder for HLE)
+        out.push(0x00000061, c.addr>>>0, (c.projection ? 1 : 0) | (c.load ? 2 : 0) | (c.push ? 4 : 0));
         break;
       case 'DrawCI8Tri':
         out.push(
