@@ -60,6 +60,12 @@ export function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: 
   let texTMode: 0 | 1 | 2 = 0;
   // 0=NEAREST, 1=BILINEAR
   let texFilter: 0 | 1 = 0;
+  // Current bound texture for 3D pipeline
+  // fmt: 0=NONE,1=CI4,2=CI8,3=RGBA16
+  let curTexFmt: 0 | 1 | 2 | 3 = 0;
+  let curTexAddr: number = 0 >>> 0;
+  let curTexW = 0 >>> 0;
+  let curTexH = 0 >>> 0;
   // Blending state: 0=OFF, 1=AVERAGE_50, 2=SRC_OVER_ALPHA_1BIT
   let blendMode: 0 | 1 | 2 = 0;
   // Z-buffer state
@@ -273,6 +279,21 @@ export function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: 
         if (wordsLeft < 1) return;
         const m = bus.loadU32(addr) >>> 0; addr = (addr + 4) >>> 0; wordsLeft -= 1;
         combineMode = (m === 1 ? 1 : m === 2 ? 2 : 0);
+        break;
+      }
+      case 0x00000033: { // SET_TEX_IMAGE3D: next 2 words: addr, fmt (0=CI4,1=CI8,2=RGBA16)
+        if (wordsLeft < 2) return;
+        curTexAddr = bus.loadU32(addr) >>> 0; addr = (addr + 4) >>> 0;
+        const f = bus.loadU32(addr) >>> 0; addr = (addr + 4) >>> 0;
+        curTexFmt = (f === 0 ? 1 : f === 1 ? 2 : 3) as 0|1|2|3;
+        wordsLeft -= 2;
+        break;
+      }
+      case 0x00000034: { // SET_TEX_DIM: next 2 words: width, height
+        if (wordsLeft < 2) return;
+        curTexW = bus.loadU32(addr) >>> 0; addr = (addr + 4) >>> 0;
+        curTexH = bus.loadU32(addr) >>> 0; addr = (addr + 4) >>> 0;
+        wordsLeft -= 2;
         break;
       }
       case 0x00000040: { // DRAW_PRIM_TRI: next 6 words: x1,y1,x2,y2,x3,y3
@@ -850,7 +871,7 @@ export function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: 
         const s2 = bus.loadU32(addr)|0; addr+=4; const t2 = bus.loadU32(addr)|0; addr+=4;
         const s3 = bus.loadU32(addr)|0; addr+=4; const t3 = bus.loadU32(addr)|0; addr+=4;
         wordsLeft -= 24;
-        // Transform using current MVP (assume object coords scaled ~[-1,1] after fixed conversion upstream; if not, trivial reject will discard)
+        // Transform using current MVP
         const mvp = mvpMultiply(mv, proj);
         const aClip = transformToClip(mvp, { x: x1, y: y1, z: z1 });
         const bClip = transformToClip(mvp, { x: x2, y: y2, z: z2 });
@@ -870,7 +891,8 @@ export function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: 
         const area = edge(aS.x,aS.y,bS.x,bS.y,cS.x,cS.y);
         const wsign = area >= 0 ? 1 : -1;
         const aabs = Math.abs(area) || 1;
-        // Pixel loop with barycentric color interpolation (no texture yet)
+        const useTexture = (combineMode === 0) && (curTexFmt !== 0) && (curTexAddr >>> 0) && (curTexW|0) && (curTexH|0);
+        // Pixel loop with barycentric interpolation
         for (let y = minY; y <= maxY; y++) {
           for (let x = minX; x <= maxX; x++) {
             const w0 = edge(bS.x,bS.y,cS.x,cS.y,x,y) * wsign;
@@ -879,15 +901,130 @@ export function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: 
             if (w0 >= 0 && w1 >= 0 && w2 >= 0) {
               if (x < scX0 || x >= scX1 || y < scY0 || y >= scY1) continue;
               const l0 = w0 / aabs, l1 = w1 / aabs, l2 = w2 / aabs;
-              const rf = l0 * (r1 & 0xff) + l1 * (r2 & 0xff) + l2 * (r3 & 0xff);
-              const gf = l0 * (g1 & 0xff) + l1 * (g2 & 0xff) + l2 * (g3 & 0xff);
-              const bf = l0 * (b1 & 0xff) + l1 * (b2 & 0xff) + l2 * (b3 & 0xff);
-              const r5 = Math.max(0, Math.min(31, Math.round((rf / 255) * 31))) >>> 0;
-              const g5 = Math.max(0, Math.min(31, Math.round((gf / 255) * 31))) >>> 0;
-              const b5 = Math.max(0, Math.min(31, Math.round((bf / 255) * 31))) >>> 0;
-              const color = (((r5 & 0x1f) << 11) | ((g5 & 0x1f) << 6) | ((b5 & 0x1f) << 1) | 1) >>> 0;
+              // Z-buffer test (interpolate screen-space z)
+              let pass = true;
+              if (zEnable && zAddr >>> 0) {
+                const zf = l0 * (aS.z|0) + l1 * (bS.z|0) + l2 * (cS.z|0);
+                const zNew = (Math.round(zf) & 0xFFFF) >>> 0;
+                if (x < (zWidth|0) && y < (zHeight|0)) {
+                  const zp = (zAddr + ((y * (zWidth|0) + x) << 1)) >>> 0;
+                  const zOld = zp + 1 < ram.length ? readU16BE(zp) : 0xFFFF;
+                  if (zNew < zOld) { if (zp + 1 < ram.length) { ram[zp] = (zNew >>> 8) & 0xFF; ram[zp+1] = zNew & 0xFF; } }
+                  else pass = false;
+                }
+              }
+              if (!pass) continue;
+              let outColor: number;
+              if (combineMode === 1 /*PRIM*/ || combineMode === 2 /*ENV*/) {
+                outColor = (combineMode === 1 ? primColor : envColor) >>> 0;
+              } else if (useTexture) {
+                // Perspective-correct ST using invW
+                const denom = l0 * aS.invW + l1 * bS.invW + l2 * cS.invW;
+                const sF = denom !== 0 ? ((l0 * s1 * aS.invW + l1 * s2 * bS.invW + l2 * s3 * cS.invW) / denom) : 0;
+                const tF = denom !== 0 ? ((l0 * t1 * aS.invW + l1 * t2 * bS.invW + l2 * t3 * cS.invW) / denom) : 0;
+                if (curTexFmt === 3) { // RGBA16
+                  const sample = (S: number, T: number) => {
+                    const ss = nearestIndex(S, curTexW, texSMode);
+                    const tt = nearestIndex(T, curTexH, texTMode);
+                    const idx = tt * curTexW + ss;
+                    const p = (curTexAddr + idx * 2) >>> 0;
+                    const hi = ram[p] ?? 0; const lo = ram[p + 1] ?? 0;
+                    return ((hi << 8) | lo) >>> 0;
+                  };
+                  if (texFilter === 1) {
+                    const nb = bilinearNeighbors(sF, tF, curTexW, curTexH, texSMode, texTMode);
+                    const { s0i, s1i, t0i, t1i, a, b } = nb;
+                    const c00 = sample(s0i, t0i), c10 = sample(s1i, t0i), c01 = sample(s0i, t1i), c11 = sample(s1i, t1i);
+                    const r00=(c00>>>11)&0x1f, g00=(c00>>>6)&0x1f, b00=(c00>>>1)&0x1f, a00=c00&1;
+                    const r10=(c10>>>11)&0x1f, g10=(c10>>>6)&0x1f, b10=(c10>>>1)&0x1f, a10=c10&1;
+                    const r01=(c01>>>11)&0x1f, g01=(c01>>>6)&0x1f, b01=(c01>>>1)&0x1f, a01=c01&1;
+                    const r11=(c11>>>11)&0x1f, g11=(c11>>>6)&0x1f, b11=(c11>>>1)&0x1f, a11=c11&1;
+                    const r0=r00+(r10-r00)*a, r1=r01+(r11-r01)*a; const R=Math.round(r0+(r1-r0)*b)&0x1f;
+                    const g0=g00+(g10-g00)*a, g1=g01+(g11-g01)*a; const G=Math.round(g0+(g1-g0)*b)&0x1f;
+                    const bb0=b00+(b10-b00)*a, bb1=b01+(b11-b01)*a; const B=Math.round(bb0+(bb1-bb0)*b)&0x1f;
+                    const a0v=a00+(a10-a00)*a, a1v=a01+(a11-a01)*a; const A=(Math.round(a0v+(a1v-a0v)*b)&1);
+                    outColor = (((R & 0x1f) << 11) | ((G & 0x1f) << 6) | ((B & 0x1f) << 1) | A) >>> 0;
+                  } else {
+                    outColor = sample(sF, tF);
+                  }
+                } else if (curTexFmt === 2) { // CI8
+                  const idxNearest = (S: number, T: number) => {
+                    const ss = nearestIndex(S, curTexW, texSMode);
+                    const tt = nearestIndex(T, curTexH, texTMode);
+                    return (ram[curTexAddr + (tt * curTexW + ss)] ?? 0) >>> 0;
+                  };
+                  let color: number;
+                  if (texFilter === 1) {
+                    const nb = bilinearNeighbors(sF, tF, curTexW, curTexH, texSMode, texTMode);
+                    const { s0i, s1i, t0i, t1i, a, b } = nb;
+                    const i00 = idxNearest(s0i, t0i), i10 = idxNearest(s1i, t0i), i01 = idxNearest(s0i, t1i), i11 = idxNearest(s1i, t1i);
+                    const c00=(currentTLUT?.[i00] ?? 0)>>>0, c10=(currentTLUT?.[i10] ?? 0)>>>0, c01=(currentTLUT?.[i01] ?? 0)>>>0, c11=(currentTLUT?.[i11] ?? 0)>>>0;
+                    const r00=(c00>>>11)&0x1f, g00=(c00>>>6)&0x1f, b00=(c00>>>1)&0x1f, a00=c00&1;
+                    const r10=(c10>>>11)&0x1f, g10=(c10>>>6)&0x1f, b10=(c10>>>1)&0x1f, a10=c10&1;
+                    const r01=(c01>>>11)&0x1f, g01=(c01>>>6)&0x1f, b01=(c01>>>1)&0x1f, a01=c01&1;
+                    const r11=(c11>>>11)&0x1f, g11=(c11>>>6)&0x1f, b11=(c11>>>1)&0x1f, a11=c11&1;
+                    const r0=r00+(r10-r00)*a, r1=r01+(r11-r01)*a; const R=Math.round(r0+(r1-r0)*b)&0x1f;
+                    const g0=g00+(g10-g00)*a, g1=g01+(g11-g01)*a; const G=Math.round(g0+(g1-g0)*b)&0x1f;
+                    const bb0=b00+(b10-b00)*a, bb1=b01+(b11-b01)*a; const B=Math.round(bb0+(bb1-bb0)*b)&0x1f;
+                    const a0v=a00+(a10-a00)*a, a1v=a01+(a11-a01)*a; const A=(Math.round(a0v+(a1v-a0v)*b)&1);
+                    color = (((R & 0x1f) << 11) | ((G & 0x1f) << 6) | ((B & 0x1f) << 1) | A) >>> 0;
+                  } else {
+                    const i = idxNearest(sF, tF);
+                    color = (currentTLUT?.[i] ?? 0) >>> 0;
+                  }
+                  outColor = color >>> 0;
+                } else if (curTexFmt === 1) { // CI4
+                  const sampleCI4 = (S: number, T: number) => {
+                    const ss = nearestIndex(S, curTexW, texSMode);
+                    const tt = nearestIndex(T, curTexH, texTMode);
+                    const index = tt * curTexW + ss;
+                    const byte = ram[curTexAddr + (index >> 1)] ?? 0;
+                    const idx4 = (index & 1) === 0 ? ((byte >>> 4) & 0xF) : (byte & 0xF);
+                    const off = (currentCI4Palette & 0xF) * 16;
+                    return (currentTLUT?.[(idx4 + off) & 0xFF] ?? 0) >>> 0;
+                  };
+                  if (texFilter === 1) {
+                    const nb = bilinearNeighbors(sF, tF, curTexW, curTexH, texSMode, texTMode);
+                    const { s0i, s1i, t0i, t1i, a, b } = nb;
+                    const c00 = sampleCI4(s0i, t0i), c10 = sampleCI4(s1i, t0i), c01 = sampleCI4(s0i, t1i), c11 = sampleCI4(s1i, t1i);
+                    const r00=(c00>>>11)&0x1f, g00=(c00>>>6)&0x1f, b00=(c00>>>1)&0x1f, a00=c00&1;
+                    const r10=(c10>>>11)&0x1f, g10=(c10>>>6)&0x1f, b10=(c10>>>1)&0x1f, a10=c10&1;
+                    const r01=(c01>>>11)&0x1f, g01=(c01>>>6)&0x1f, b01=(c01>>>1)&0x1f, a01=c01&1;
+                    const r11=(c11>>>11)&0x1f, g11=(c11>>>6)&0x1f, b11=(c11>>>1)&0x1f, a11=c11&1;
+                    const r0=r00+(r10-r00)*a, r1=r01+(r11-r01)*a; const R=Math.round(r0+(r1-r0)*b)&0x1f;
+                    const g0=g00+(g10-g00)*a, g1=g01+(g11-g01)*a; const G=Math.round(g0+(g1-g0)*b)&0x1f;
+                    const bb0=b00+(b10-b00)*a, bb1=b01+(b11-b01)*a; const B=Math.round(bb0+(bb1-bb0)*b)&0x1f;
+                    const a0v=a00+(a10-a00)*a, a1v=a01+(a11-a01)*a; const A=(Math.round(a0v+(a1v-a0v)*b)&1);
+                    outColor = (((R & 0x1f) << 11) | ((G & 0x1f) << 6) | ((B & 0x1f) << 1) | A) >>> 0;
+                  } else {
+                    outColor = sampleCI4(sF, tF);
+                  }
+                } else {
+                  // No texture bound; fall back to color interpolation
+                  const rf = l0 * (r1 & 0xff) + l1 * (r2 & 0xff) + l2 * (r3 & 0xff);
+                  const gf = l0 * (g1 & 0xff) + l1 * (g2 & 0xff) + l2 * (g3 & 0xff);
+                  const bf = l0 * (b1 & 0xff) + l1 * (b2 & 0xff) + l2 * (b3 & 0xff);
+                  const r5 = Math.max(0, Math.min(31, Math.round((rf / 255) * 31))) >>> 0;
+                  const g5 = Math.max(0, Math.min(31, Math.round((gf / 255) * 31))) >>> 0;
+                  const b5 = Math.max(0, Math.min(31, Math.round((bf / 255) * 31))) >>> 0;
+                  outColor = (((r5 & 0x1f) << 11) | ((g5 & 0x1f) << 6) | ((b5 & 0x1f) << 1) | 1) >>> 0;
+                }
+              } else {
+                // Color interpolation (no texture)
+                const rf = l0 * (r1 & 0xff) + l1 * (r2 & 0xff) + l2 * (r3 & 0xff);
+                const gf = l0 * (g1 & 0xff) + l1 * (g2 & 0xff) + l2 * (g3 & 0xff);
+                const bf = l0 * (b1 & 0xff) + l1 * (b2 & 0xff) + l2 * (b3 & 0xff);
+                const r5 = Math.max(0, Math.min(31, Math.round((rf / 255) * 31))) >>> 0;
+                const g5 = Math.max(0, Math.min(31, Math.round((gf / 255) * 31))) >>> 0;
+                const b5 = Math.max(0, Math.min(31, Math.round((bf / 255) * 31))) >>> 0;
+                outColor = (((r5 & 0x1f) << 11) | ((g5 & 0x1f) << 6) | ((b5 & 0x1f) << 1) | 1) >>> 0;
+              }
               const p = origin + (y * stride + x) * 2;
-              if (p + 1 < ram.length) { ram[p] = (color >>> 8) & 0xff; ram[p + 1] = color & 0xff; }
+              if (p + 1 < ram.length) {
+                let final = outColor >>> 0;
+                if (blendMode !== 0) { const dst = (((ram[p] ?? 0) << 8) | (ram[p+1] ?? 0)) >>> 0; final = applyBlend(dst, final); }
+                ram[p] = (final >>> 8) & 0xff; ram[p + 1] = final & 0xff;
+              }
             }
           }
         }

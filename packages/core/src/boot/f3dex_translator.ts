@@ -188,6 +188,9 @@ export function translateF3DEXToUc(bus: Pick<Bus, 'loadU32'>, dlAddr: number, ma
         imgFmt = fmt;
         noteSetImg(fmt);
         imgAddr = resolve(w1 >>> 0);
+        if (fmt) {
+          out.push({ op: 'SetTexImage3D', fmt, addr: imgAddr } as any);
+        }
         break;
       }
       case 0xF0: { // G_LOADTLUT (mocked)
@@ -204,6 +207,7 @@ export function translateF3DEXToUc(bus: Pick<Bus, 'loadU32'>, dlAddr: number, ma
         // Convert 10.2 fixed: pixel size is lr-ul+[+1] per HW; we follow our typed translator heuristic
         tileW = Math.max(0, Math.floor((lrx - ulx) / 4 + 1));
         tileH = Math.max(0, Math.floor((lry - uly) / 4 + 1));
+        out.push({ op: 'SetTexDim', width: tileW|0, height: tileH|0 } as any);
         break;
       }
       case 0xE3: { // Mock: G_SCISSOR - parse ulx/uly and lrx/lry in 10.2 fixed like TEXRECT
@@ -427,6 +431,7 @@ export function translateF3DEXToUc(bus: Pick<Bus, 'loadU32'>, dlAddr: number, ma
           const cmt = (w1 >>> 18) & 0x3;
           const modeFrom = (v: number): 'CLAMP' | 'WRAP' | 'MIRROR' => (v === 2 ? 'CLAMP' : v === 1 ? 'MIRROR' : 'WRAP');
           out.push({ op: 'SetTexAddrMode', sMode: modeFrom(cms), tMode: modeFrom(cmt) });
+          out.push({ op: 'SetCI4Palette', palette: ci4Palette & 0xF });
           break;
         }
         // ignore unknowns

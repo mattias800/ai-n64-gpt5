@@ -69,16 +69,16 @@ function printUsage() {
      [--timing-profile dev|fast|realistic] [--trace-timing [path.csv]]
   n64-headless rom-scan-mio0 <rom.z64> [--out path.json] [--extract-dir dir] [--limit N] [--min-size BYTES]
   n64-headless curate-images <dir> [--top N] [--out path.json] [--copy-top dir] [--recursive]
+  n64-headless trace-compare --trace path/to/cen64.log --rom /abs/SM64.z64 [--max-steps N] [--skip N] [--report out.json]
  
  Examples:
    n64-headless sm64-demo --frames 1
    n64-headless sm64-demo --frames 2 --snapshot tmp/sm64_2f.ppm
    n64-headless f3dex-rom-run tmp/rom_demo.json --snapshot tmp/rom.png
    n64-headless rom-boot-run mario64.z64 --cycles 5000000 --vi-interval 10000 --width 320 --height 240 --snapshot tmp/boot/boot.png --sram-file saves/mario64.sram --sram-save-on-exit
-   n64-headless rom-boot-run banjo.z64 --flash-file saves/banjo.flash --flash-save-on-exit
    n64-headless rom-scan-mio0 mario64.z64 --out tmp/mio0_scan.json --extract-dir tmp/mio0
  `);
- }
+}
 
 async function runRomScanMio0(args: string[]) {
   const file = args.find(a => !a.startsWith('--'));
@@ -2649,6 +2649,115 @@ async function runRomBootRun(args: string[]) {
   }, null, 2));
 }
 
+async function runTraceCompare(args: string[]) {
+  // Options: --trace path --rom path [--max-steps N] [--skip N] [--report path.json] [--format auto]
+  const opts: Record<string, string> = {};
+  for (let i = 0; i < args.length; i++) { const a = args[i]!; if (a.startsWith('--')) { const key = a.slice(2); const next = (i + 1 < args.length) ? args[i + 1] : undefined; const val = (next && !next.startsWith('--')) ? args[++i]! : '1'; opts[key] = val; } }
+  const tracePath = String(opts['trace'] || opts['log'] || '');
+  const romPath = String(opts['rom'] || '');
+  const maxSteps = parseNum(opts['max-steps'] || opts['max'] || opts['limit'], 0) >>> 0;
+  const skip = parseNum(opts['skip'] || '0', 0) >>> 0;
+  const reportPath = opts['report'] ? String(opts['report']) : '';
+  const format = String(opts['format'] || 'auto').toLowerCase();
+  if (!tracePath || !romPath) { console.error('trace-compare requires --trace <path> and --rom <path>'); process.exit(1); }
+
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const text = fs.readFileSync(tracePath, 'utf8');
+  const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+  type TraceRec = { pc?: number; instr?: number; regs?: Map<number, number> };
+
+  function parseHexOrDec(s: string): number { const t = s.trim(); if (/^0x[0-9a-fA-F]+$/.test(t)) return parseInt(t, 16) >>> 0; const n = Number(t); return Number.isFinite(n) ? (n >>> 0) : 0; }
+
+  const recs: TraceRec[] = [];
+  const pcRe = /(?:^|\b)(?:pc|PC)\s*[:=]\s*(0x[0-9a-fA-F]+|\d+)/;
+  const insnRe = /(?:^|\b)(?:insn|instr|opcode|op|word)\s*[:=]\s*(0x[0-9a-fA-F]+|\d+)/;
+  const regGlobalRe = /(?:^|\b)(?:r|R|gpr|GPR)\s*(\d{1,2})\s*[:=]\s*(0x[0-9a-fA-F]+|\d+)/g;
+  for (let i = 0; i < lines.length; i++) {
+    const ln = lines[i]!;
+    const rec: TraceRec = {};
+    const mpc = ln.match(pcRe); if (mpc) rec.pc = parseHexOrDec(mpc[1]!);
+    const mi = ln.match(insnRe); if (mi) rec.instr = parseHexOrDec(mi[1]!);
+    if (format === 'auto') {
+      const regs = new Map<number, number>();
+      let mm: RegExpExecArray | null;
+      const re = new RegExp(regGlobalRe);
+      while ((mm = re.exec(ln)) !== null) {
+        const idx = parseInt(mm[1]!, 10) >>> 0; const val = parseHexOrDec(mm[2]!);
+        if (idx < 32) regs.set(idx, val >>> 0);
+      }
+      if (regs.size > 0) rec.regs = regs;
+    }
+    recs.push(rec);
+  }
+  const startIdx = Math.min(skip >>> 0, recs.length);
+
+  // Setup emulator
+  const rdram = new RDRAM(8 * 1024 * 1024);
+  const bus = new Bus(rdram);
+  const cpu = new CPU(bus);
+  const sys = new System(cpu, bus);
+  const rom = fs.readFileSync(path.isAbsolute(romPath) ? romPath : path.resolve(romPath));
+  const { normalizeRomToBigEndian, parseHeader } = await import('@n64/core');
+  const { data: beRom } = normalizeRomToBigEndian(new Uint8Array(rom));
+  bus.setROM(beRom);
+  // Copy initial image to RDRAM and set initial PC to ROM header
+  const header = parseHeader(beRom);
+  bus.rdram.bytes.set(beRom.subarray(0, Math.min(beRom.length, bus.rdram.bytes.length)), 0);
+  cpu.pc = header.initialPC >>> 0;
+
+  function vaToPhys(va: number): number | null {
+    const a = va >>> 0; const region = a >>> 28; if (region === 0x8 || region === 0x9) return (a - 0x80000000) >>> 0; if (region === 0xA || region === 0xB) return (a - 0xA0000000) >>> 0; if (region < 0x8) return a >>> 0; return null;
+  }
+  function be32(buf: Uint8Array, off: number): number { const b0 = buf[off] ?? 0; const b1 = buf[off+1] ?? 0; const b2 = buf[off+2] ?? 0; const b3 = buf[off+3] ?? 0; return (((b0<<24)|(b1<<16)|(b2<<8)|b3)>>>0); }
+
+  const max = (maxSteps && maxSteps > 0) ? Math.min(maxSteps, recs.length - startIdx) : (recs.length - startIdx);
+  let divergence: any = null;
+  let steps = 0;
+  for (let i = startIdx; i < recs.length && steps < max; i++, steps++) {
+    const r = recs[i]!;
+    const curPC = cpu.pc >>> 0;
+    const pa = vaToPhys(curPC);
+    const curInstr = (pa !== null && pa + 4 <= bus.rdram.bytes.length) ? be32(bus.rdram.bytes, pa) >>> 0 : 0;
+    // Compare if provided
+    const pcOk = (r.pc === undefined) || ((r.pc >>> 0) === (curPC >>> 0));
+    const instrOk = (r.instr === undefined) || ((r.instr >>> 0) === (curInstr >>> 0));
+    let regsOk = true;
+    if (r.regs && r.regs.size > 0) {
+      for (const [idx, val] of r.regs.entries()) {
+        const got = (cpu.regs[idx] as number | undefined) ?? 0;
+        if ((got >>> 0) !== (val >>> 0)) { regsOk = false; break; }
+      }
+    }
+    if (!pcOk || !instrOk || !regsOk) {
+      divergence = {
+        atLine: i, step: steps, reason: (!pcOk ? 'PC' : (!instrOk ? 'INSTR' : 'REG')),
+        trace: { pc: r.pc ?? null, instr: r.instr ?? null },
+        ours: { pc: curPC >>> 0, instr: curInstr >>> 0 },
+regsMismatch: r.regs && !regsOk ? Array.from(r.regs.entries()).filter(([idx, v]) => ((((cpu.regs[idx] as number | undefined) ?? 0)>>>0)!== (v>>>0))).map(([idx, v]) => ({ idx, expected: v>>>0, got: (((cpu.regs[idx] as number | undefined) ?? 0)>>>0) })) : undefined,
+      };
+      break;
+    }
+    // Step one instruction
+    try { cpu.step(); } catch (e: any) {
+      divergence = { atLine: i, step: steps, reason: 'EXCEPTION', error: String(e?.message || e), pc: curPC>>>0, instr: curInstr>>>0 };
+      break;
+    }
+  }
+
+  const summary = {
+    command: 'trace-compare', trace: tracePath, rom: romPath, totalLines: recs.length, skipped: startIdx, steps, divergence,
+    endPC: cpu.pc >>> 0,
+    gpr: Array.from(cpu.regs).map(n => (n>>>0)),
+    gprHi: Array.from(cpu.regsHi).map(n => (n>>>0)),
+    cp0: { status: cpu.cop0.read(12)>>>0, cause: cpu.cop0.read(13)>>>0, epc: cpu.cop0.read(14)>>>0 },
+  };
+  if (reportPath) {
+    try { await (await import('node:fs')).promises.mkdir(path.dirname(reportPath), { recursive: true }); await (await import('node:fs')).promises.writeFile(reportPath, JSON.stringify(summary, null, 2), 'utf8'); console.log(`[trace] wrote report ${reportPath}`); } catch (e) { console.error('[trace] failed to write report:', e); }
+  }
+  console.log(JSON.stringify(summary, null, 2));
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   const cmd = argv[0];
@@ -2690,6 +2799,10 @@ async function main() {
   }
   if (cmd === 'rom-boot-run') {
     await runRomBootRun(argv.slice(1));
+    return;
+  }
+  if (cmd === 'trace-compare') {
+    await runTraceCompare(argv.slice(1));
     return;
   }
   if (cmd === 'rom-scan-mio0') {

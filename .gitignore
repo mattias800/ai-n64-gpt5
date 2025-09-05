@@ -18,3 +18,5 @@ packages/**/build/
 
 # Project artifacts
 tmp/
+*.z64
+*.bin

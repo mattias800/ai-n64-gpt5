@@ -13,6 +13,8 @@ export type UcCmd =
   | { op: 'SetZEnable'; enable: boolean }
   | { op: 'SetZBuffer'; addr: number; width: number; height: number }
   | { op: 'ClearZ'; value: number }
+  | { op: 'SetTexImage3D'; fmt: 'CI4' | 'CI8' | 'RGBA16'; addr: number }
+  | { op: 'SetTexDim'; width: number; height: number }
   | { op: 'DrawCI8'; w: number; h: number; addr: number; x: number; y: number }
   | { op: 'DrawCI4'; w: number; h: number; addr: number; x: number; y: number }
   | { op: 'DrawPrimTri'; x1: number; y1: number; x2: number; y2: number; x3: number; y3: number }
@@ -58,6 +60,15 @@ export function ucToRspdlWords(cmds: UcCmd[], strideWords: number = 64): Uint32A
         let mode = 0;
         if (c.mode === 'PRIM') mode = 1; else if (c.mode === 'ENV') mode = 2; else mode = 0; // TEXEL0
         out.push(0x00000032, mode >>> 0);
+        break;
+      }
+      case 'SetTexImage3D': {
+        const fmt = c.fmt === 'CI4' ? 0 : c.fmt === 'CI8' ? 1 : 2; // RGBA16=2
+        out.push(0x00000033, c.addr >>> 0, fmt >>> 0);
+        break;
+      }
+      case 'SetTexDim': {
+        out.push(0x00000034, c.width >>> 0, c.height >>> 0);
         break;
       }
       case 'SetTexAddrMode': {
