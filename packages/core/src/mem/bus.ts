@@ -1,6 +1,7 @@
 import { readU16BE, readU32BE, writeU16BE, writeU32BE } from '../utils/bit.js';
 import { MI, MI_BASE, MI_SIZE, SP, SP_BASE, SP_SIZE, DP, DP_BASE, DP_SIZE, VI, VI_BASE, VI_SIZE, AI, AI_BASE, AI_SIZE, PI, PI_BASE, PI_SIZE, SI, SI_BASE, SI_SIZE, RI, RI_BASE, RI_SIZE, FlashRAM } from '../devices/mmio.js';
 import { CART_ROM_BASE } from '../devices/mmio.js';
+import type { IDpCore, IRspCore } from '../devices/interfaces.js';
 
 // Safe environment flag checker for browser builds
 function envFlag(name: string): boolean {
@@ -38,6 +39,10 @@ export class Bus {
   readonly si = new SI();
   readonly ri = new RI();
 
+  // Optional pluggable cores (LLE)
+  private rspCore: IRspCore | null = null;
+  private dpCore: IDpCore | null = null;
+
   private rom: Uint8Array | null = null;
 
   constructor(public readonly rdram: RDRAM) {
@@ -48,10 +53,32 @@ export class Bus {
     this.si.setMI(this.mi);
     this.vi.setMI(this.mi);
     this.ai.setMI(this.mi);
-    // Provide SI/PI/SP access to RDRAM for deterministic DMA
+    // Provide SI/PI/SP/DP access to RDRAM for deterministic DMA and command fetch
     this.si.setRDRAM(this.rdram.bytes);
     this.pi.setRDRAM(this.rdram.bytes);
     this.sp.setRDRAM(this.rdram.bytes);
+    this.dp.setRDRAM(this.rdram.bytes);
+  }
+
+  // Register a pluggable RSP core (LLE). This does not replace SP MMIO; it augments it.
+  setRSPCore(core: IRspCore): void {
+    this.rspCore = core;
+    core.setMI(this.mi as unknown as any);
+    core.setRDRAM(this.rdram.bytes);
+    // Keep DMEM/IMEM in sync: share SP buffers if possible
+    try {
+      Object.defineProperty(core, 'dmem', { get: () => this.sp.dmem });
+      Object.defineProperty(core, 'imem', { get: () => this.sp.imem });
+    } catch {}
+    // Bridge SP start to RSP core if it exposes onStart
+    this.sp.onStart = core.onStart;
+  }
+
+  // Register a pluggable DP core (LLE). This augments DP MMIO.
+  setDPCore(core: IDpCore): void {
+    this.dpCore = core;
+    core.setMI(this.mi as unknown as any);
+    if (core.setRDRAM) core.setRDRAM(this.rdram.bytes);
   }
 
   // Raw physical MMIO read/write helpers (skip virtual translation)
@@ -153,6 +180,12 @@ export class Bus {
       return readU16BE(this.rdram.bytes, p);
     }
     return 0;
+  }
+
+  loadS16(addr: number): number {
+    const value = this.loadU16(addr);
+    // Sign extend from 16-bit to 32-bit
+    return (value << 16) >> 16;
   }
 
   loadU32(addr: number): number {

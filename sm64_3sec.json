@@ -1,0 +1,9 @@
+{
+  "romPath": "./mario64.z64",
+  "frames": 180,
+  "width": 320,
+  "height": 240,
+  "origin": 0,
+  "startCycle": 0,
+  "interval": 1000000
+}

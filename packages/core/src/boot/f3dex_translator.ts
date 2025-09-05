@@ -1,5 +1,6 @@
 import type { UcCmd } from './ucode_translator.js';
 import type { Bus } from '../mem/bus.js';
+import { noteMtx, noteVtx, noteTri1, noteTri2, noteTexRect, noteScissor, noteSetImg, noteSetCombine, noteSetTexFilter } from './hle3d_instrumentation.js';
 
 // Minimal, mock-friendly F3DEX bytecode translator.
 // Parses a tiny subset sufficient for parity tests:
@@ -17,6 +18,10 @@ import type { Bus } from '../mem/bus.js';
 //  - 0xED: SET_Z_BUFFER (mock; w0: width<<16|height, w1: addr)
 //  - 0xEE: CLEAR_Z (mock; w1: 16-bit value)
 //  - 0xDF: G_ENDDL
+//  - 0x01: G_MTX (matrix load)
+//  - 0x04: G_VTX (vertex load) 
+//  - 0xBF: G_TRI1 (single triangle)
+//  - 0xB1: G_TRI2 (two triangles)
 // Unknown ops are ignored.
 // NOTE: This is not a full/accurate F3DEX implementation; it is a deliberately small
 // stub to drive our RSP-DL HLE with verifiable tests. We'll extend it incrementally.
@@ -59,6 +64,119 @@ export function translateF3DEXToUc(bus: Pick<Bus, 'loadU32'>, dlAddr: number, ma
     const op = (w0 >>> 24) & 0xFF;
     cmds++;
     switch (op) {
+      case 0x01: { // G_MTX - Load transformation matrix
+        const params = w0 & 0xFF;
+        const matrixAddr = resolve(w1 >>> 0);
+        const isProjection = (params & 0x01) !== 0;
+        const isLoad = (params & 0x02) !== 0; // vs multiply
+        const isPush = (params & 0x04) !== 0;
+        noteMtx();
+        // For HLE, we'll just note that a matrix was loaded
+        out.push({ op: 'LoadMatrix', addr: matrixAddr, projection: isProjection, load: isLoad, push: isPush } as any);
+        break;
+      }
+      case 0x04: { // G_VTX - Load vertices
+        const numVerts = ((w0 >>> 12) & 0xFF) >>> 0;
+        const startIdx = ((w0 >>> 1) & 0x7F) >>> 0;
+        const vertAddr = resolve(w1 >>> 0);
+        noteVtx(numVerts);
+        // Load vertices in N64 format (16 bytes each)
+        for (let i = 0; i < numVerts; i++) {
+          const vAddr = (vertAddr + i * 16) >>> 0;
+          // Read vertex data (x,y,z are s16, flag is u16, s,t are s16, rgba are u8)
+          const xy = bus.loadU32(vAddr) >>> 0;
+          const zf = bus.loadU32(vAddr + 4) >>> 0;
+          const st = bus.loadU32(vAddr + 8) >>> 0;
+          const rgba = bus.loadU32(vAddr + 12) >>> 0;
+          
+          const x = (xy >> 16) & 0xFFFF;
+          const y = xy & 0xFFFF;
+          const z = (zf >> 16) & 0xFFFF;
+          const s = (st >> 16) & 0xFFFF;
+          const t = st & 0xFFFF;
+          const r = (rgba >>> 24) & 0xFF;
+          const g = (rgba >>> 16) & 0xFF;
+          const b = (rgba >>> 8) & 0xFF;
+          const a = rgba & 0xFF;
+          
+          // Store in vertex buffer at specified index
+          if (startIdx + i < 32) { // Max 32 vertices in buffer
+            while (vtx.length <= startIdx + i) vtx.push({ x: 0, y: 0 });
+            vtx[startIdx + i] = { 
+              x: (x << 16) >> 16, // Sign extend
+              y: (y << 16) >> 16,
+              z: (z << 16) >> 16,
+              s: s >> 5, // Convert texture coords
+              t: t >> 5,
+              r, g, b, a
+            } as any;
+          }
+        }
+        break;
+      }
+      case 0xBF: { // G_TRI1 - Draw one triangle
+        const v0 = ((w0 >>> 16) & 0xFF) / 2;
+        const v1 = ((w0 >>> 8) & 0xFF) / 2;
+        const v2 = (w0 & 0xFF) / 2;
+        noteTri1();
+        const a = vtx[v0], b = vtx[v1], c = vtx[v2];
+        if (a && b && c) {
+          out.push({ op: 'Draw3DTri',
+            x1: a.x|0, y1: a.y|0, z1: (a as any).z|0,
+            x2: b.x|0, y2: b.y|0, z2: (b as any).z|0,
+            x3: c.x|0, y3: c.y|0, z3: (c as any).z|0,
+            r1: (a as any).r|0, g1: (a as any).g|0, b1: (a as any).b|0,
+            r2: (b as any).r|0, g2: (b as any).g|0, b2: (b as any).b|0,
+            r3: (c as any).r|0, g3: (c as any).g|0, b3: (c as any).b|0,
+            s1: (a.s ?? 0)|0, t1: (a.t ?? 0)|0,
+            s2: (b.s ?? 0)|0, t2: (b.t ?? 0)|0,
+            s3: (c.s ?? 0)|0, t3: (c.t ?? 0)|0,
+          } as any);
+        }
+        break;
+      }
+      case 0xB1: { // G_TRI2 - Draw two triangles  
+        noteTri2();
+        // First triangle
+        const v0 = ((w0 >>> 16) & 0xFF) / 2;
+        const v1 = ((w0 >>> 8) & 0xFF) / 2;
+        const v2 = (w0 & 0xFF) / 2;
+        // Second triangle
+        const v3 = ((w1 >>> 16) & 0xFF) / 2;
+        const v4 = ((w1 >>> 8) & 0xFF) / 2;
+        const v5 = (w1 & 0xFF) / 2;
+        
+        const a = vtx[v0], b = vtx[v1], c = vtx[v2];
+        if (a && b && c) {
+          out.push({ op: 'Draw3DTri',
+            x1: a.x|0, y1: a.y|0, z1: (a as any).z|0,
+            x2: b.x|0, y2: b.y|0, z2: (b as any).z|0,
+            x3: c.x|0, y3: c.y|0, z3: (c as any).z|0,
+            r1: (a as any).r|0, g1: (a as any).g|0, b1: (a as any).b|0,
+            r2: (b as any).r|0, g2: (b as any).g|0, b2: (b as any).b|0,
+            r3: (c as any).r|0, g3: (c as any).g|0, b3: (c as any).b|0,
+            s1: (a.s ?? 0)|0, t1: (a.t ?? 0)|0,
+            s2: (b.s ?? 0)|0, t2: (b.t ?? 0)|0,
+            s3: (c.s ?? 0)|0, t3: (c.t ?? 0)|0,
+          } as any);
+        }
+        
+        const d = vtx[v3], e = vtx[v4], f = vtx[v5];
+        if (d && e && f) {
+          out.push({ op: 'Draw3DTri',
+            x1: d.x|0, y1: d.y|0, z1: (d as any).z|0,
+            x2: e.x|0, y2: e.y|0, z2: (e as any).z|0,
+            x3: f.x|0, y3: f.y|0, z3: (f as any).z|0,
+            r1: (d as any).r|0, g1: (d as any).g|0, b1: (d as any).b|0,
+            r2: (e as any).r|0, g2: (e as any).g|0, b2: (e as any).b|0,
+            r3: (f as any).r|0, g3: (f as any).g|0, b3: (f as any).b|0,
+            s1: (d.s ?? 0)|0, t1: (d.t ?? 0)|0,
+            s2: (e.s ?? 0)|0, t2: (e.t ?? 0)|0,
+            s3: (f.s ?? 0)|0, t3: (f.t ?? 0)|0,
+          } as any);
+        }
+        break;
+      }
       case 0xDF: { // G_ENDDL
         if (retStack.length > 0) { p = retStack.pop()! >>> 0; break; }
         out.push({ op: 'End' });
@@ -68,6 +186,7 @@ export function translateF3DEXToUc(bus: Pick<Bus, 'loadU32'>, dlAddr: number, ma
         const siz = (w0 >>> 19) & 0x3;
         const fmt = sizeFromSizBits(siz);
         imgFmt = fmt;
+        noteSetImg(fmt);
         imgAddr = resolve(w1 >>> 0);
         break;
       }
@@ -97,12 +216,14 @@ export function translateF3DEXToUc(bus: Pick<Bus, 'loadU32'>, dlAddr: number, ma
         const x1 = fp10_2_to_px(lrx);
         const y1 = fp10_2_to_px(lry);
         scissor = { x0, y0, x1, y1 };
+        noteScissor();
         out.push({ op: 'SetScissor', x0, y0, x1, y1 });
         break;
       }
       case 0xE4: { // G_TEXRECT
         if (imgAddr == null || imgFmt == null) break;
         if (imgFmt === 'CI4') out.push({ op: 'SetCI4Palette', palette: ci4Palette & 0xF });
+        noteTexRect();
         const ulx = (w0 >>> 12) & 0xFFF;
         const uly = (w0 >>> 0) & 0xFFF;
         const lrx = (w1 >>> 12) & 0xFFF;
@@ -265,6 +386,7 @@ export function translateF3DEXToUc(bus: Pick<Bus, 'loadU32'>, dlAddr: number, ma
       case 0xFC: { // G_SETCOMBINE (mocked): low 2 bits of w1 encode 0=TEXEL0,1=PRIM,2=ENV
         const m = (w1 & 0x3) >>> 0;
         const mode = m === 1 ? 'PRIM' as const : m === 2 ? 'ENV' as const : 'TEXEL0' as const;
+        noteSetCombine(mode);
         out.push({ op: 'SetCombine', mode });
         break;
       }
@@ -275,6 +397,7 @@ export function translateF3DEXToUc(bus: Pick<Bus, 'loadU32'>, dlAddr: number, ma
       }
       case 0xEA: { // Mock: SET_TEX_FILTER (w1: 0=NEAREST,1=BILINEAR)
         const bil = (w1 & 1) !== 0;
+        noteSetTexFilter(bil ? 'BILINEAR' : 'NEAREST');
         out.push({ op: 'SetTexFilter', mode: bil ? 'BILINEAR' : 'NEAREST' });
         break;
       }

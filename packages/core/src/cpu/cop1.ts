@@ -61,7 +61,9 @@ export class COP1 {
    * Read single-precision register
    */
   readS(reg: number): number {
-    return this.regs[reg & 31] || 0;
+    // Don't use || 0 as it would convert NaN to 0
+    const value = this.regs[reg & 31];
+    return value !== undefined ? value : 0;
   }
   
   /**
@@ -76,7 +78,9 @@ export class COP1 {
    */
   readD(reg: number): number {
     const idx = (reg >> 1) & 15;
-    return this.regsDouble[idx] || 0;
+    // Don't use || 0 as it would convert NaN to 0
+    const value = this.regsDouble[idx];
+    return value !== undefined ? value : 0;
   }
   
   /**
@@ -296,11 +300,8 @@ export class COP1 {
     
     if (a < 0) {
       this.setException(FPUException.INVALID);
-      // Store NaN as a float32 bit pattern
-      const nanBits = 0x7FC00000; // Standard quiet NaN for single precision
-      const view = new DataView(new ArrayBuffer(4));
-      view.setUint32(0, nanBits, false);
-      this.writeS(fd, view.getFloat32(0, false));
+      // JavaScript NaN is already a proper IEEE-754 quiet NaN
+      this.writeS(fd, NaN);
     } else {
       this.writeS(fd, Math.sqrt(a));
     }
@@ -424,8 +425,9 @@ export class COP1 {
     const b = this.readS(ft);
     let result = false;
     
-    // Check for NaN properly using Number.isNaN
-    const unordered = Number.isNaN(a) || Number.isNaN(b);
+    // Check for unordered (when either operand is NaN)
+    // Test both values with isNaN() method
+    const unordered = isNaN(a) || isNaN(b);
     
     // Condition codes (bits 2:0 of cond)
     // Only evaluate less/equal if not unordered

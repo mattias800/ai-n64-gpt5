@@ -11,6 +11,9 @@ import { bilinearNeighbors, nearestIndex } from '../gfx/texture_sampling.js';
 import type { TitleLoopResult } from './title_dp_driven.js';
 import { translateF3DEXToUc } from './f3dex_translator.js';
 import { ucToRspdlWords } from './ucode_translator.js';
+import { makeMat4 } from '../gfx/vertex_pipeline.js';
+import { mvpMultiply, transformToClip, clipToScreen } from '../gfx/vertex_pipeline.js';
+import { triviallyRejects } from '../gfx/tri_project.js';
 
 // Simple RSP-HLE DL opcodes (32-bit words):
 //   0x00000000: END
@@ -84,6 +87,41 @@ export function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: 
     if (blendMode === 2) return (src & 1) !== 0 ? (src >>> 0) : (dst >>> 0);
     return src >>> 0;
   }
+  // Minimal 3D state (HLE): model-view and projection matrices
+  let mv = makeMat4([
+    1,0,0,0,
+    0,1,0,0,
+    0,0,1,0,
+    0,0,0,1,
+  ]);
+  let proj = makeMat4([
+    1,0,0,0,
+    0,1,0,0,
+    0,0,1,0,
+    0,0,0,1,
+  ]);
+  const mvStack: ReturnType<typeof makeMat4>[] = [];
+  const pStack: ReturnType<typeof makeMat4>[] = [];
+  function loadMat16_16(addr32: number): ReturnType<typeof makeMat4> {
+    // Read 16 32-bit signed fixed 16.16 (big-endian via bus.loadU32)
+    const m: number[] = new Array(16);
+    for (let i = 0; i < 16; i++) {
+      const w = bus.loadU32((addr32 + i * 4) >>> 0) | 0;
+      // Interpret as signed 32-bit then divide by 65536
+      const f = (w / 65536.0);
+      m[i] = f;
+    }
+    // Heuristic: if matrix is all zeros, treat as identity
+    let nonZero = false; for (let i = 0; i < 16; i++) if (m[i] !== 0) { nonZero = true; break; }
+    if (!nonZero) return makeMat4([
+      1,0,0,0,
+      0,1,0,0,
+      0,0,1,0,
+      0,0,0,1,
+    ]);
+    return makeMat4(m);
+  }
+
   while (wordsLeft > 0) {
     const op = bus.loadU32(addr) >>> 0; addr = (addr + 4) >>> 0; wordsLeft--;
     switch (op >>> 0) {
@@ -796,6 +834,80 @@ export function execRSPDLFrame(bus: Bus, width: number, height: number, dlAddr: 
               }
             }
           }
+        }
+        break;
+      }
+      case 0x00000060: { // DRAW_3D_TRI (HLE): x/y/z for three verts + per-vertex rgb + st
+        // next 18 words: x1,y1,z1,x2,y2,z2,x3,y3,z3,r1,g1,b1,r2,g2,b2,r3,g3,b3,s1,t1,s2,t2,s3,t3
+        if (wordsLeft < 24) { /* not enough */ break; }
+        const x1 = bus.loadU32(addr)|0; addr+=4; const y1 = bus.loadU32(addr)|0; addr+=4; const z1 = bus.loadU32(addr)|0; addr+=4;
+        const x2 = bus.loadU32(addr)|0; addr+=4; const y2 = bus.loadU32(addr)|0; addr+=4; const z2 = bus.loadU32(addr)|0; addr+=4;
+        const x3 = bus.loadU32(addr)|0; addr+=4; const y3 = bus.loadU32(addr)|0; addr+=4; const z3 = bus.loadU32(addr)|0; addr+=4;
+        const r1 = bus.loadU32(addr)|0; addr+=4; const g1 = bus.loadU32(addr)|0; addr+=4; const b1 = bus.loadU32(addr)|0; addr+=4;
+        const r2 = bus.loadU32(addr)|0; addr+=4; const g2 = bus.loadU32(addr)|0; addr+=4; const b2 = bus.loadU32(addr)|0; addr+=4;
+        const r3 = bus.loadU32(addr)|0; addr+=4; const g3 = bus.loadU32(addr)|0; addr+=4; const b3 = bus.loadU32(addr)|0; addr+=4;
+        const s1 = bus.loadU32(addr)|0; addr+=4; const t1 = bus.loadU32(addr)|0; addr+=4;
+        const s2 = bus.loadU32(addr)|0; addr+=4; const t2 = bus.loadU32(addr)|0; addr+=4;
+        const s3 = bus.loadU32(addr)|0; addr+=4; const t3 = bus.loadU32(addr)|0; addr+=4;
+        wordsLeft -= 24;
+        // Transform using current MVP (assume object coords scaled ~[-1,1] after fixed conversion upstream; if not, trivial reject will discard)
+        const mvp = mvpMultiply(mv, proj);
+        const aClip = transformToClip(mvp, { x: x1, y: y1, z: z1 });
+        const bClip = transformToClip(mvp, { x: x2, y: y2, z: z2 });
+        const cClip = transformToClip(mvp, { x: x3, y: y3, z: z3 });
+        if (triviallyRejects({ a: aClip, b: bClip, c: cClip })) break;
+        const aS = clipToScreen(aClip, { x: 0, y: 0, width, height });
+        const bS = clipToScreen(bClip, { x: 0, y: 0, width, height });
+        const cS = clipToScreen(cClip, { x: 0, y: 0, width, height });
+        const origin = bus.loadU32(VI_BASE + VI_ORIGIN_OFF) >>> 0;
+        const stride = bus.loadU32(VI_BASE + VI_WIDTH_OFF) >>> 0;
+        const ram = bus.rdram.bytes;
+        const minX = Math.max(0, Math.min(aS.x, bS.x, cS.x));
+        const maxX = Math.min(width - 1, Math.max(aS.x, bS.x, cS.x));
+        const minY = Math.max(0, Math.min(aS.y, bS.y, cS.y));
+        const maxY = Math.min(height - 1, Math.max(aS.y, bS.y, cS.y));
+        function edge(ax:number,ay:number,bx:number,by:number,px:number,py:number){ return (px-ax)*(by-ay)-(py-ay)*(bx-ax); }
+        const area = edge(aS.x,aS.y,bS.x,bS.y,cS.x,cS.y);
+        const wsign = area >= 0 ? 1 : -1;
+        const aabs = Math.abs(area) || 1;
+        // Pixel loop with barycentric color interpolation (no texture yet)
+        for (let y = minY; y <= maxY; y++) {
+          for (let x = minX; x <= maxX; x++) {
+            const w0 = edge(bS.x,bS.y,cS.x,cS.y,x,y) * wsign;
+            const w1 = edge(cS.x,cS.y,aS.x,aS.y,x,y) * wsign;
+            const w2 = edge(aS.x,aS.y,bS.x,bS.y,x,y) * wsign;
+            if (w0 >= 0 && w1 >= 0 && w2 >= 0) {
+              if (x < scX0 || x >= scX1 || y < scY0 || y >= scY1) continue;
+              const l0 = w0 / aabs, l1 = w1 / aabs, l2 = w2 / aabs;
+              const rf = l0 * (r1 & 0xff) + l1 * (r2 & 0xff) + l2 * (r3 & 0xff);
+              const gf = l0 * (g1 & 0xff) + l1 * (g2 & 0xff) + l2 * (g3 & 0xff);
+              const bf = l0 * (b1 & 0xff) + l1 * (b2 & 0xff) + l2 * (b3 & 0xff);
+              const r5 = Math.max(0, Math.min(31, Math.round((rf / 255) * 31))) >>> 0;
+              const g5 = Math.max(0, Math.min(31, Math.round((gf / 255) * 31))) >>> 0;
+              const b5 = Math.max(0, Math.min(31, Math.round((bf / 255) * 31))) >>> 0;
+              const color = (((r5 & 0x1f) << 11) | ((g5 & 0x1f) << 6) | ((b5 & 0x1f) << 1) | 1) >>> 0;
+              const p = origin + (y * stride + x) * 2;
+              if (p + 1 < ram.length) { ram[p] = (color >>> 8) & 0xff; ram[p + 1] = color & 0xff; }
+            }
+          }
+        }
+        break;
+      }
+      case 0x00000061: { // LOAD_MATRIX (HLE): addr, flags
+        if (wordsLeft < 2) break;
+        const mAddr = bus.loadU32(addr) >>> 0; addr += 4;
+        const flags = bus.loadU32(addr) >>> 0; addr += 4;
+        wordsLeft -= 2;
+        const isProj = (flags & 1) !== 0;
+        const isLoad = (flags & 2) !== 0;
+        const isPush = (flags & 4) !== 0;
+        const mat = loadMat16_16(mAddr >>> 0);
+        if (isProj) {
+          if (isPush) pStack.push(proj);
+          proj = isLoad ? mat : makeMat4(mvpMultiply(proj, mat).m);
+        } else {
+          if (isPush) mvStack.push(mv);
+          mv = isLoad ? mat : makeMat4(mvpMultiply(mv, mat).m);
         }
         break;
       }

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { Bus, RDRAM, CPU, System, runSM64TitleDemoDP, runSM64TitleDemoSPDP, writeSM64TitleTasksToRDRAM, scheduleSPTitleTasksFromRDRAMAndRun, writeRSPTitleDLsToRDRAM, scheduleRSPDLFramesAndRun, writeUcAsRspdl, f3dToUc, scheduleRSPDLFromTableAndRun, scheduleF3DEXFromTableAndRun, translateF3DEXAndExecNow, hlePiLoadSegments, decompressMIO0, viScanout, PI_BASE, PI_STATUS_OFF, PI_STATUS_DMA_BUSY, PI_STATUS_IO_BUSY, hlePifControllerStatus, hlePifReadControllerState } from '@n64/core';
+import { Bus, RDRAM, CPU, System, runSM64TitleDemoDP, runSM64TitleDemoSPDP, writeSM64TitleTasksToRDRAM, scheduleSPTitleTasksFromRDRAMAndRun, writeRSPTitleDLsToRDRAM, scheduleRSPDLFramesAndRun, writeUcAsRspdl, f3dToUc, scheduleRSPDLFromTableAndRun, scheduleF3DEXFromTableAndRun, translateF3DEXAndExecNow, hlePiLoadSegments, decompressMIO0, viScanout, PI_BASE, PI_STATUS_OFF, PI_STATUS_DMA_BUSY, PI_STATUS_IO_BUSY, hlePifControllerStatus, hlePifReadControllerState, getHle3DStats, resetHle3DStats } from '@n64/core';
 import { crc32 } from './lib.js';
 
 function parseNum(val: string | undefined, def: number): number {
@@ -1112,6 +1112,8 @@ async function runF3dexRomRun(args: string[]) {
   }
 
   const total = start + interval * frames + 2;
+  // Reset HLE3D counters for this run
+  resetHle3DStats();
   const { image, frames: imgs, res } = scheduleF3DEXFromTableAndRun(cpu, bus, sys, origin, width, height, tableBase, frames, stagingBase, strideWords, start, interval, total, spOffset, bgStart, bgEnd);
   const perFrame: string[] = [];
   for (let i = 0; i < imgs.length; i++) {
@@ -1124,7 +1126,9 @@ async function runF3dexRomRun(args: string[]) {
     }
     perFrame.push(crc32(imgs[i]!));
   }
-  console.log(JSON.stringify({ command: 'f3dex-rom-run', cfg: { width, height, origin, start, interval, frames, spOffset, tableBase, stagingBase, strideWords }, perFrameCRC32: perFrame, crc32: crc32(image), acks: res, snapshot: snapshot||null }, null, 2));
+  const hle3dLog = !!(process.env.HLE3D_LOG || process.env.N64_HLE3D_LOG);
+  const hle3dStats = hle3dLog ? getHle3DStats() : undefined;
+  console.log(JSON.stringify({ command: 'f3dex-rom-run', cfg: { width, height, origin, start, interval, frames, spOffset, tableBase, stagingBase, strideWords }, perFrameCRC32: perFrame, crc32: crc32(image), acks: res, snapshot: snapshot||null, hle3d: hle3dStats }, null, 2));
 }
 
 type TileCfg = {
@@ -1241,6 +1245,8 @@ async function runSm64RomTitle(args: string[]) {
   // If bg is provided, pass it through so the renderer composes a gradient even when there are no tiles.
   const bgStart = cfg.bg ? num(cfg.bg.start5551) : undefined;
   const bgEnd = cfg.bg ? num(cfg.bg.end5551) : undefined;
+  // Reset HLE3D counters for this run
+  resetHle3DStats();
   const { image, frames: imgs, res } = scheduleF3DEXFromTableAndRun(
     cpu, bus, sys, origin, width, height,
     tableBase, frames, stagingBase, strideWords,
@@ -1258,7 +1264,9 @@ async function runSm64RomTitle(args: string[]) {
     }
     perFrame.push(crc32(imgs[i]!));
   }
-  console.log(JSON.stringify({ command: 'sm64-rom-title', cfg: { width, height, origin, start, interval, frames, spOffset }, perFrameCRC32: perFrame, crc32: crc32(image), acks: res, snapshot: snapshot||null }, null, 2));
+  const hle3dLog = !!(process.env.HLE3D_LOG || process.env.N64_HLE3D_LOG);
+  const hle3dStats = hle3dLog ? getHle3DStats() : undefined;
+  console.log(JSON.stringify({ command: 'sm64-rom-title', cfg: { width, height, origin, start, interval, frames, spOffset }, perFrameCRC32: perFrame, crc32: crc32(image), acks: res, snapshot: snapshot||null, hle3d: hle3dStats }, null, 2));
 }
 
 async function runRomBootRun(args: string[]) {

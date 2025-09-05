@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { runF3dexFromTableCore } from '../src/f3dex_runner';
+import { runF3dexFromTableCore } from '../src/f3dex_table_core';
 import { crc32Hex } from '../src/crc32';
 
 describe('web f3dex table core (gradient via bgStart/bgEnd)', () => {

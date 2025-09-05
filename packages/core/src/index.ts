@@ -25,6 +25,14 @@ export { f3dToUc } from './boot/f3d_translator.js';
 export { translateF3DEXToUc } from './boot/f3dex_translator.js';
 export { readControllerState } from './input/input.js';
 export { decompressMIO0 } from './utils/mio0.js';
+// HLE 3D instrumentation (for discovery/logging)
+export type { Hle3DStats } from './boot/hle3d_instrumentation.js';
+export { getHle3DStats, resetHle3DStats } from './boot/hle3d_instrumentation.js';
 // Re-export selected MMIO constants for headless tooling and tests
 export { PI_BASE, PI_STATUS_OFF, PI_STATUS_DMA_BUSY, PI_STATUS_IO_BUSY } from './devices/mmio.js';
+// Pluggable device interfaces and helpers
+export { getLLEFlags } from './devices/interfaces.js';
+export type { IRspCore, IDpCore } from './devices/interfaces.js';
+// RSP core scaffold
+export { RspCore } from './rsp/rsp_core.js';
 
