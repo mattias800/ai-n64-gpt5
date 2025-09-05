@@ -1,5 +1,6 @@
 import type { UcCmd } from './ucode_translator.js';
 import type { Bus } from '../mem/bus.js';
+import { noteMtx, noteVtx, noteTri1, noteTri2, noteTexRect, noteScissor, noteSetImg, noteSetCombine, noteSetTexFilter } from './hle3d_instrumentation.js';
 
 // Minimal, mock-friendly F3DEX bytecode translator.
 // Parses a tiny subset sufficient for parity tests:
@@ -69,6 +70,7 @@ export function translateF3DEXToUc(bus: Pick<Bus, 'loadU32'>, dlAddr: number, ma
         const isProjection = (params & 0x01) !== 0;
         const isLoad = (params & 0x02) !== 0; // vs multiply
         const isPush = (params & 0x04) !== 0;
+        noteMtx();
         // For HLE, we'll just note that a matrix was loaded
         out.push({ op: 'LoadMatrix', addr: matrixAddr, projection: isProjection, load: isLoad, push: isPush } as any);
         break;
@@ -77,6 +79,7 @@ export function translateF3DEXToUc(bus: Pick<Bus, 'loadU32'>, dlAddr: number, ma
         const numVerts = ((w0 >>> 12) & 0xFF) >>> 0;
         const startIdx = ((w0 >>> 1) & 0x7F) >>> 0;
         const vertAddr = resolve(w1 >>> 0);
+        noteVtx(numVerts);
         // Load vertices in N64 format (16 bytes each)
         for (let i = 0; i < numVerts; i++) {
           const vAddr = (vertAddr + i * 16) >>> 0;
@@ -115,6 +118,7 @@ export function translateF3DEXToUc(bus: Pick<Bus, 'loadU32'>, dlAddr: number, ma
         const v0 = ((w0 >>> 16) & 0xFF) / 2;
         const v1 = ((w0 >>> 8) & 0xFF) / 2;
         const v2 = (w0 & 0xFF) / 2;
+        noteTri1();
         const a = vtx[v0], b = vtx[v1], c = vtx[v2];
         if (a && b && c) {
           out.push({ op: 'Draw3DTri',
@@ -132,6 +136,7 @@ export function translateF3DEXToUc(bus: Pick<Bus, 'loadU32'>, dlAddr: number, ma
         break;
       }
       case 0xB1: { // G_TRI2 - Draw two triangles  
+        noteTri2();
         // First triangle
         const v0 = ((w0 >>> 16) & 0xFF) / 2;
         const v1 = ((w0 >>> 8) & 0xFF) / 2;
@@ -181,6 +186,7 @@ export function translateF3DEXToUc(bus: Pick<Bus, 'loadU32'>, dlAddr: number, ma
         const siz = (w0 >>> 19) & 0x3;
         const fmt = sizeFromSizBits(siz);
         imgFmt = fmt;
+        noteSetImg(fmt);
         imgAddr = resolve(w1 >>> 0);
         break;
       }
@@ -210,12 +216,14 @@ export function translateF3DEXToUc(bus: Pick<Bus, 'loadU32'>, dlAddr: number, ma
         const x1 = fp10_2_to_px(lrx);
         const y1 = fp10_2_to_px(lry);
         scissor = { x0, y0, x1, y1 };
+        noteScissor();
         out.push({ op: 'SetScissor', x0, y0, x1, y1 });
         break;
       }
       case 0xE4: { // G_TEXRECT
         if (imgAddr == null || imgFmt == null) break;
         if (imgFmt === 'CI4') out.push({ op: 'SetCI4Palette', palette: ci4Palette & 0xF });
+        noteTexRect();
         const ulx = (w0 >>> 12) & 0xFFF;
         const uly = (w0 >>> 0) & 0xFFF;
         const lrx = (w1 >>> 12) & 0xFFF;
@@ -378,6 +386,7 @@ export function translateF3DEXToUc(bus: Pick<Bus, 'loadU32'>, dlAddr: number, ma
       case 0xFC: { // G_SETCOMBINE (mocked): low 2 bits of w1 encode 0=TEXEL0,1=PRIM,2=ENV
         const m = (w1 & 0x3) >>> 0;
         const mode = m === 1 ? 'PRIM' as const : m === 2 ? 'ENV' as const : 'TEXEL0' as const;
+        noteSetCombine(mode);
         out.push({ op: 'SetCombine', mode });
         break;
       }
@@ -388,6 +397,7 @@ export function translateF3DEXToUc(bus: Pick<Bus, 'loadU32'>, dlAddr: number, ma
       }
       case 0xEA: { // Mock: SET_TEX_FILTER (w1: 0=NEAREST,1=BILINEAR)
         const bil = (w1 & 1) !== 0;
+        noteSetTexFilter(bil ? 'BILINEAR' : 'NEAREST');
         out.push({ op: 'SetTexFilter', mode: bil ? 'BILINEAR' : 'NEAREST' });
         break;
       }
