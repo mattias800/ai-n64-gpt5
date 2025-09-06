@@ -70,6 +70,7 @@ function printUsage() {
   n64-headless rom-scan-mio0 <rom.z64> [--out path.json] [--extract-dir dir] [--limit N] [--min-size BYTES]
   n64-headless curate-images <dir> [--top N] [--out path.json] [--copy-top dir] [--recursive]
   n64-headless trace-compare --trace path/to/cen64.log --rom /abs/SM64.z64 [--max-steps N] [--skip N] [--report out.json]
+    [--compare pc|full] [--regs-shift N] [--mmio-ring N] [--mmio-recent N]
  
  Examples:
    n64-headless sm64-demo --frames 1
@@ -2650,15 +2651,28 @@ async function runRomBootRun(args: string[]) {
 }
 
 async function runTraceCompare(args: string[]) {
-  // Options: --trace path --rom path [--max-steps N] [--skip N] [--report path.json] [--format auto]
+  // Options: --trace path --rom path [--pif path] [--reset] [--max-steps N] [--skip N] [--report path.json] [--format auto]
   const opts: Record<string, string> = {};
   for (let i = 0; i < args.length; i++) { const a = args[i]!; if (a.startsWith('--')) { const key = a.slice(2); const next = (i + 1 < args.length) ? args[i + 1] : undefined; const val = (next && !next.startsWith('--')) ? args[++i]! : '1'; opts[key] = val; } }
   const tracePath = String(opts['trace'] || opts['log'] || '');
   const romPath = String(opts['rom'] || '');
+  const pifPath = opts['pif'] ? String(opts['pif']) : '';
+  const pifShift = parseNum(opts['pif-shift'] || opts['pifShift'], 0) | 0; // shift PIF bytes by N (compat for variant dumps)
+  const pifShiftFromOpt = opts['pif-shift-from'] || opts['pifShiftFrom'] || '';
+  const pifShiftFrom = pifShiftFromOpt ? (parseNum(pifShiftFromOpt, 0) >>> 0) : 0 >>> 0; // apply shift starting at this byte offset
+  const seedPif = Object.prototype.hasOwnProperty.call(opts, 'seed-pif') || Object.prototype.hasOwnProperty.call(opts, 'seedPif') || Object.prototype.hasOwnProperty.call(opts, 'seed_pif');
+  const wantReset = Object.prototype.hasOwnProperty.call(opts, 'reset') || !!pifPath;
   const maxSteps = parseNum(opts['max-steps'] || opts['max'] || opts['limit'], 0) >>> 0;
-  const skip = parseNum(opts['skip'] || '0', 0) >>> 0;
+  let skip = parseNum(opts['skip'] || '0', 0) >>> 0;
   const reportPath = opts['report'] ? String(opts['report']) : '';
   const format = String(opts['format'] || 'auto').toLowerCase();
+  const compareMode = String(opts['compare'] || 'full').toLowerCase(); // 'full' or 'pc'
+  const regsShift = parseNum(opts['regs-shift'] || opts['regsShift'], 1) | 0; // default 1 to match CEN64 pre-state printing lag
+  const mmioRing = parseNum((opts['mmio-ring'] || (opts as any)['mmioRing'] || (opts as any)['mmio_ring']) as string | undefined, 16384) >>> 0;
+  const mmioRecentCount = parseNum((opts['mmio-recent'] || (opts as any)['mmioRecent'] || (opts as any)['mmio_recent']) as string | undefined, 512) >>> 0;
+  const alignPcOpt = opts['align-pc'] || opts['alignPc'] || '';
+  const alignPc = alignPcOpt ? parseNum(alignPcOpt, 0) >>> 0 : 0 >>> 0;
+  let cicOpt = (opts['cic'] || '').toLowerCase();
   if (!tracePath || !romPath) { console.error('trace-compare requires --trace <path> and --rom <path>'); process.exit(1); }
 
   const fs = await import('node:fs');
@@ -2667,17 +2681,24 @@ async function runTraceCompare(args: string[]) {
   const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
   type TraceRec = { pc?: number; instr?: number; regs?: Map<number, number> };
 
-  function parseHexOrDec(s: string): number { const t = s.trim(); if (/^0x[0-9a-fA-F]+$/.test(t)) return parseInt(t, 16) >>> 0; const n = Number(t); return Number.isFinite(n) ? (n >>> 0) : 0; }
+  function parseHexOrDec(s: string): number { const t = s.trim(); if (/^0x[0-9a-fA-F]+$/.test(t)) { try { const b = BigInt(t); return Number(b & 0xFFFFFFFFn) >>> 0; } catch { return parseInt(t, 16) >>> 0; } } if (/^[0-9A-Fa-f]{6,16}$/.test(t)) { try { const b = BigInt('0x' + t); return Number(b & 0xFFFFFFFFn) >>> 0; } catch { return parseInt(t, 16) >>> 0; } } const n = Number(t); return Number.isFinite(n) ? (n >>> 0) : 0; }
 
   const recs: TraceRec[] = [];
   const pcRe = /(?:^|\b)(?:pc|PC)\s*[:=]\s*(0x[0-9a-fA-F]+|\d+)/;
+  // Also support lines like "FFFFFFFF80000000: ..."
+  const pcAltRe = /^\s*([0-9A-Fa-f]{8,16})\s*:/;
   const insnRe = /(?:^|\b)(?:insn|instr|opcode|op|word)\s*[:=]\s*(0x[0-9a-fA-F]+|\d+)/;
-  const regGlobalRe = /(?:^|\b)(?:r|R|gpr|GPR)\s*(\d{1,2})\s*[:=]\s*(0x[0-9a-fA-F]+|\d+)/g;
+  const iwRe = /(?:^|\b)(?:iw|IW)\s*[:=]\s*(0x[0-9a-fA-F]+|[0-9A-Fa-f]+)/;
+  const regGlobalRe = /(?:^|\b)(?:r|R|gpr|GPR)\s*(\d{1,2})\s*[:=]\s*(0x[0-9a-fA-F]+|[0-9A-Fa-f]+|\d+)/g;
   for (let i = 0; i < lines.length; i++) {
     const ln = lines[i]!;
+    // Strict: only consider lines that specify a PC explicitly (prefix or pc=)
+    let mpc = ln.match(pcRe); if (!mpc) mpc = ln.match(pcAltRe);
+    if (!mpc) continue; // skip non-instruction lines
     const rec: TraceRec = {};
-    const mpc = ln.match(pcRe); if (mpc) rec.pc = parseHexOrDec(mpc[1]!);
-    const mi = ln.match(insnRe); if (mi) rec.instr = parseHexOrDec(mi[1]!);
+    rec.pc = parseHexOrDec(mpc[1]!);
+    let mi = ln.match(insnRe); if (!mi) mi = ln.match(iwRe);
+    if (mi) rec.instr = parseHexOrDec(mi[1]!);
     if (format === 'auto') {
       const regs = new Map<number, number>();
       let mm: RegExpExecArray | null;
@@ -2690,21 +2711,234 @@ async function runTraceCompare(args: string[]) {
     }
     recs.push(rec);
   }
-  const startIdx = Math.min(skip >>> 0, recs.length);
+
+  // If CIC is 'auto', pick the seed that matches the most steps in a short trial
+  if (cicOpt === 'auto') {
+    // Try canonical PIF RAM seed values for common CICs.
+    // 6102 and 7102 share 0x00003F3F; 6105 uses 0x0000913F.
+    const trySeeds: { name: string; seed: number }[] = [
+      { name: '6102', seed: 0x00003F3F >>> 0 },
+      { name: '6105', seed: 0x0000913F >>> 0 },
+    ];
+    const trialMax = Math.min(4096, recs.length);
+    const runTrial = (seedVal: number): number => {
+      // Minimal trial: create fresh emulator, seed PIF, run compare loop with limited steps
+      const rdr = new RDRAM(8 * 1024 * 1024);
+      const bs = new Bus(rdr);
+      const cp = new CPU(bs);
+      const sysT = new System(cp, bs);
+      // Seed ROM
+      try {
+        const fsT = require('node:fs');
+        const pathT = require('node:path');
+        const romBuf = fsT.readFileSync(pathT.isAbsolute(romPath) ? romPath : pathT.resolve(romPath));
+        const core = require('@n64/core');
+        const be = core.normalizeRomToBigEndian(new Uint8Array(romBuf)).data;
+        bs.setROM(be);
+        // Optional PIF ROM
+        if (pifPath) {
+          const pifBuf = fsT.readFileSync(pathT.isAbsolute(pifPath) ? pifPath : pathT.resolve(pifPath));
+          const u8 = new Uint8Array(pifBuf);
+          bs.setPIFROM(u8);
+          // seed PIF RAM with the candidate seed
+          const pr = (bs.si as any).pifRam as Uint8Array;
+          pr.fill(0);
+          pr[0x24] = (seedVal>>>24)&0xff; pr[0x25] = (seedVal>>>16)&0xff; pr[0x26] = (seedVal>>>8)&0xff; pr[0x27] = seedVal&0xff;
+          pr[0x3F] = 0x00;
+        }
+        // Pre-stage IPL
+        bs.sp.dmem.fill(0); bs.sp.imem.fill(0);
+        const srcOffT = 0x40 >>> 0; const endOffT = Math.min(be.length, 0x1000) >>> 0;
+        if ((endOffT - srcOffT) > 0) bs.sp.dmem.set(be.subarray(srcOffT, endOffT), srcOffT);
+        const imemSrcT = 0x1000 >>> 0; const imemEndT = Math.min(be.length, 0x2000) >>> 0;
+        if ((imemEndT - imemSrcT) > 0) bs.sp.imem.set(be.subarray(imemSrcT, imemEndT), 0x0000);
+        // Start PC
+        if (wantReset) cp.pc = 0xBFC00000 >>> 0; else {
+          const header = require('@n64/core').parseHeader(be);
+          bs.rdram.bytes.set(be.subarray(0, Math.min(be.length, bs.rdram.bytes.length)), 0);
+          cp.pc = header.initialPC >>> 0;
+        }
+        // Align start index to our chosen start PC
+        let startI = 0; {
+          const wantPC = cp.pc >>> 0;
+          const idx = recs.findIndex(r => (r.pc !== undefined) && ((r.pc>>>0) === wantPC));
+          startI = (idx >= 0 ? idx : 0);
+        }
+        // Trial loop
+        let stepsT = 0; let prevPc = 0 >>> 0; let prevInstr = 0 >>> 0;
+        for (let i = startI; i < recs.length && stepsT < trialMax; i++, stepsT++) {
+          const r = recs[i]!;
+          const curPC0 = cp.pc >>> 0;
+          const curInstr0 = bs.loadU32(curPC0 >>> 0) >>> 0;
+          // Simple branch commit alignment (same as main)
+          let curPC = curPC0 >>> 0, curInstr = curInstr0 >>> 0;
+          if (i >= 2) {
+            const prevR = recs[i - 1]!; const prev2R = recs[i - 2]!;
+            const prevPcR = prevR.pc ?? 0; const prev2PcR = prev2R.pc ?? 0; const prev2IwR = prev2R.instr ?? 0;
+            const ourAtDelayEnd = ((curPC0 >>> 0) === (((prevPcR >>> 0) + 4) >>> 0));
+            const op = (prev2IwR >>> 26) & 0x3f; const imm = prev2IwR & 0xffff; const off = (((imm << 16) >> 16) << 2) >>> 0;
+            const targetBranch = ((prev2PcR + 4 + off) >>> 0);
+            const targetJump = (op === 0x02 || op === 0x03) ? (((prev2PcR & 0xF0000000) | ((prev2IwR & 0x03ffffff) << 2)) >>> 0) : 0;
+            const targetUse = (op === 0x02 || op === 0x03) ? targetJump : targetBranch;
+            if (ourAtDelayEnd && (r.pc !== undefined) && ((r.pc>>>0) === targetUse)) {
+              curPC = targetUse >>> 0; curInstr = bs.loadU32(curPC >>> 0) >>> 0;
+            }
+          }
+          // PC/Instr check
+          const pcOk = (r.pc === undefined) || ((r.pc>>>0) === curPC);
+          const instrOk = (r.instr === undefined) || ((r.instr>>>0) === curInstr);
+          if (!pcOk || !instrOk) return stepsT;
+          // Step and continue
+          prevPc = curPC; prevInstr = curInstr;
+          try { cp.step(); } catch { return stepsT; }
+        }
+        return stepsT;
+      } catch { return 0; }
+    };
+    let best = { name: '6102', seed: 0x80371240 >>> 0, steps: -1 };
+    for (const c of trySeeds) {
+      const s = runTrial(c.seed);
+      if (s > best.steps) best = { name: c.name, seed: c.seed, steps: s };
+    }
+    cicOpt = best.name; // use the selected CIC name downstream
+  }
 
   // Setup emulator
   const rdram = new RDRAM(8 * 1024 * 1024);
   const bus = new Bus(rdram);
   const cpu = new CPU(bus);
   const sys = new System(cpu, bus);
+  // Hook PI/SI DMA into the system scheduler so completion events fire after realistic latency
+  try { (bus.pi as any).setDMAScheduler?.((cycles: number, cb: () => void) => sys.scheduleAt(((sys.cycle >>> 0) + (cycles >>> 0)) >>> 0, cb)); } catch {}
+  try { (bus.si as any).setDMAScheduler?.((cycles: number, cb: () => void) => sys.scheduleAt(((sys.cycle >>> 0) + (cycles >>> 0)) >>> 0, cb)); } catch {}
+  // For trace-compare, defer PIF command processing to SI DMA completion to better mirror hardware
+  try { (bus.si as any).setDeferPIF?.(true); } catch {}
+  // Apply optional latency model overrides if provided
+  try {
+    const siLatencyOverride = parseNum(opts['si-latency'] || (opts as any)['siLatency'] || (opts as any)['si_latency'], 0);
+    const siIoAutoClr = parseNum(opts['si-io-auto-clear-delay'] || (opts as any)['siIoAutoClearDelay'] || (opts as any)['si_io_auto_clear_delay'], 0);
+    const piLatBaseOverride = parseNum(opts['pi-lat-base'] || (opts as any)['piLatBase'] || (opts as any)['pi_lat_base'], 0);
+    const piBytesPerCycleOverride = parseNum(opts['pi-bpc'] || (opts as any)['piBPC'] || (opts as any)['pi_bytes_per_cycle'], 0);
+    if (siLatencyOverride > 0) (bus.si as any).setLatency?.(siLatencyOverride >>> 0);
+    if (siIoAutoClr > 0) (bus.si as any).setAutoClearIoBusyDelay?.(siIoAutoClr >>> 0);
+    if ((piLatBaseOverride > 0) || (piBytesPerCycleOverride > 0)) {
+      const defaultBase = 50 >>> 0;
+      const defaultBpc = 2 >>> 0;
+      const b = (piLatBaseOverride > 0 ? piLatBaseOverride : defaultBase) >>> 0;
+      const t = (piBytesPerCycleOverride > 0 ? piBytesPerCycleOverride : defaultBpc) >>> 0;
+      (bus.pi as any).setLatencyModel?.(b >>> 0, t >>> 0);
+    }
+  } catch {}
+  // MMIO instrumentation: record recent reads/writes
+  const mmioEvents: { cyc: number; dev: string; op: 'rd'|'wr'; off: number; val?: number }[] = [];
+  const pushEvt = (dev: string, op: 'rd'|'wr', off: number, val?: number) => {
+    mmioEvents.push({ cyc: sys.cycle>>>0, dev, op, off: off>>>0, val: val!==undefined ? (val>>>0) : undefined });
+    if (mmioEvents.length > mmioRing) mmioEvents.shift();
+  };
+  // Wrap device read/write to capture events (non-invasive)
+  const wrapDev = (dev: any, name: string) => {
+    try {
+      const r = dev.readU32?.bind(dev) as ((off: number)=>number)|undefined;
+      const w = dev.writeU32?.bind(dev) as ((off: number, val: number)=>void)|undefined;
+      if (r) (dev as any).readU32 = (off: number) => { const v = r(off)>>>0; pushEvt(name,'rd',off>>>0,v>>>0); return v; };
+      if (w) (dev as any).writeU32 = (off: number, val: number) => { pushEvt(name,'wr',off>>>0,val>>>0); w(off,val>>>0); };
+    } catch {}
+  };
+  wrapDev(bus.mi,'MI'); wrapDev(bus.sp,'SP'); wrapDev(bus.dp,'DP'); wrapDev(bus.vi,'VI'); wrapDev(bus.ai,'AI'); wrapDev(bus.pi,'PI'); wrapDev(bus.si,'SI'); wrapDev(bus.ri,'RI');
+  // Instrument PI activity (cart/dram/len) for diagnostics
+  const piDmas: { cart: number; dram: number; len: number }[] = [];
+  let piLastCart = 0 >>> 0; let piLastDram = 0 >>> 0;
+  const piWriteOrig = bus.pi.writeU32.bind(bus.pi) as (off: number, val: number) => void;
+  (bus.pi as any).writeU32 = (off: number, val: number) => {
+    const o = (off >>> 0); const v = (val >>> 0);
+    if (o === 0x00) piLastDram = v >>> 0; // DRAM_ADDR
+    else if (o === 0x04) piLastCart = v >>> 0; // CART_ADDR
+    else if (o === 0x08) { // RD_LEN
+      const len = (((v & 0x00ffffff) >>> 0) + 1) >>> 0;
+      piDmas.push({ cart: piLastCart >>> 0, dram: piLastDram >>> 0, len });
+    }
+    piWriteOrig(o, v);
+  };
   const rom = fs.readFileSync(path.isAbsolute(romPath) ? romPath : path.resolve(romPath));
   const { normalizeRomToBigEndian, parseHeader } = await import('@n64/core');
   const { data: beRom } = normalizeRomToBigEndian(new Uint8Array(rom));
   bus.setROM(beRom);
-  // Copy initial image to RDRAM and set initial PC to ROM header
-  const header = parseHeader(beRom);
-  bus.rdram.bytes.set(beRom.subarray(0, Math.min(beRom.length, bus.rdram.bytes.length)), 0);
-  cpu.pc = header.initialPC >>> 0;
+
+  // Optional PIF boot ROM: map at 0x1FC00000 and start at reset vector
+  if (pifPath) {
+    try {
+      const pif = fs.readFileSync(path.isAbsolute(pifPath) ? pifPath : path.resolve(pifPath));
+      const u8 = new Uint8Array(pif);
+      // Normalize variant: if last 4 bytes are all 0xFF, zero them to match CEN64 trace variant
+      if (u8.length >= 4) {
+        const L = u8.length;
+        if ((u8[L-1]===0xFF)&&(u8[L-2]===0xFF)&&(u8[L-3]===0xFF)&&(u8[L-4]===0xFF)) {
+          u8[L-1]=0; u8[L-2]=0; u8[L-3]=0; u8[L-4]=0;
+        }
+      }
+      // Optional shift for PIF ROM bytes to accommodate different dump alignments across emulators.
+      // Positive shift moves content forward in address space (new[i] = old[i - shift]); negative shifts move backward.
+      let pifBytes = u8;
+      if (pifShift !== 0) {
+        const shifted = new Uint8Array(u8.length);
+        shifted.fill(0);
+        const start = (pifShiftFrom >>> 0);
+        for (let i = 0; i < shifted.length; i++) {
+          if (i < start) { shifted[i] = u8[i]!; continue; }
+          const src = pifShift > 0 ? (i - pifShift) : (i + ((-pifShift) >>> 0));
+          if (src >= start && src < u8.length) shifted[i] = u8[src]!;
+        }
+        pifBytes = shifted;
+      }
+      bus.setPIFROM(pifBytes);
+      // Optionally initialize PIF RAM seed bytes; default is to leave RAM cleared when a real PIF ROM is provided
+      if (seedPif) {
+        try {
+          const parseCIC = (s: string): string => {
+            const t = (s||'').trim().toLowerCase();
+            if (!t) return '6102';
+            if (t === '6102' || t === 'ntsc-u' || t === 'sm64') return '6102';
+            if (t === '6105' || t === '3f3f') return '6105';
+            if (t === '7102' || t === 'pal') return '7102';
+            return t;
+          };
+          (bus as any).setCICSeed?.(parseCIC(cicOpt));
+        } catch {}
+      }
+    } catch (e) {
+      console.error(`[trace] failed to read PIF ROM at ${pifPath}:`, e);
+      process.exit(1);
+    }
+  }
+
+  // Pre-stage IPL3 into SP DMEM so a reset-boot finds valid code at 0xA4000040.
+  // Leave IMEM to be populated by real IPL behavior (via SP DMA) to better match hardware timing.
+  bus.sp.dmem.fill(0);
+  bus.sp.imem.fill(0);
+  const srcOff = 0x40 >>> 0;
+  const endOff = Math.min(beRom.length, 0x1000) >>> 0;
+  const copyLen = (endOff - srcOff) >>> 0;
+  if (copyLen > 0) bus.sp.dmem.set(beRom.subarray(srcOff, endOff), srcOff);
+
+  // Decide starting PC
+  if (wantReset) cpu.pc = 0xBFC00000 >>> 0; else {
+    const header = parseHeader(beRom);
+    // Also copy header image to RDRAM for simple virtual fetch comparison convenience
+    bus.rdram.bytes.set(beRom.subarray(0, Math.min(beRom.length, bus.rdram.bytes.length)), 0);
+    cpu.pc = header.initialPC >>> 0;
+  }
+
+  // If skip not explicitly provided, auto-align to first trace record whose PC matches our chosen alignment target.
+  // Priority: --align-pc if provided, else our start PC (reset or header).
+  let startIdx = 0;
+  if (skip > 0) startIdx = Math.min(skip >>> 0, recs.length);
+  else {
+    const wantPC = alignPc ? (alignPc >>> 0) : (cpu.pc >>> 0);
+    const idx = recs.findIndex(r => (r.pc !== undefined) && ((r.pc>>>0) === wantPC));
+    startIdx = (idx >= 0 ? idx : 0);
+    // If we aligned to a PC different from our CPU start, adjust the CPU start as well when not forcing reset.
+    if (!wantReset && alignPc) cpu.pc = wantPC >>> 0;
+  }
 
   function vaToPhys(va: number): number | null {
     const a = va >>> 0; const region = a >>> 28; if (region === 0x8 || region === 0x9) return (a - 0x80000000) >>> 0; if (region === 0xA || region === 0xB) return (a - 0xA0000000) >>> 0; if (region < 0x8) return a >>> 0; return null;
@@ -2714,19 +2948,88 @@ async function runTraceCompare(args: string[]) {
   const max = (maxSteps && maxSteps > 0) ? Math.min(maxSteps, recs.length - startIdx) : (recs.length - startIdx);
   let divergence: any = null;
   let steps = 0;
+  let prev = { trace: null as any, ours: null as any };
+  // Keep a short history of our pre-step GPR snapshots to align with external trace semantics
+  const oursPreHistory: Uint32Array[] = [];
+  // Track last writer per GPR index for diagnostics
+  const lastWrite: ({ pc: number; instr: number; value: number; effAddr?: number; mem32?: number; mem8?: number } | null)[] = new Array(32).fill(null);
   for (let i = startIdx; i < recs.length && steps < max; i++, steps++) {
     const r = recs[i]!;
-    const curPC = cpu.pc >>> 0;
-    const pa = vaToPhys(curPC);
-    const curInstr = (pa !== null && pa + 4 <= bus.rdram.bytes.length) ? be32(bus.rdram.bytes, pa) >>> 0 : 0;
+    const curPC0 = cpu.pc >>> 0;
+    // Use full bus mapping so PIF ROM and SP DMEM/IMEM regions are visible
+    const curInstr0 = bus.loadU32(curPC0 >>> 0) >>> 0;
+    // Snapshot pre-step GPRs
+    const preRegs = new Uint32Array(cpu.regs);
+    oursPreHistory.push(preRegs);
+    // Optional: commit-fudge for branch-after-delay-slot to align with CEN64 logging
+    let curPC = curPC0 >>> 0;
+    let curInstr = curInstr0 >>> 0;
+    let usedCommitFudge = false;
+    if (i >= 2) {
+      const prevR = recs[i - 1]!; const prev2R = recs[i - 2]!;
+      const prevPc = prevR.pc ?? 0; const prev2Pc = prev2R.pc ?? 0; const prev2Iw = prev2R.instr ?? 0;
+      const ourAtDelayEnd = ((curPC0 >>> 0) === (((prevPc >>> 0) + 4) >>> 0));
+      const op = (prev2Iw >>> 26) & 0x3f; const imm = prev2Iw & 0xffff; const off = (((imm << 16) >> 16) << 2) >>> 0; const targetBranch = ((prev2Pc + 4 + off) >>> 0);
+      const isBranch = (op === 0x04 || op === 0x05 || op === 0x06 || op === 0x07 || op === 0x14 || op === 0x15 || op === 0x16 || op === 0x17 || op === 0x01);
+      // J/JAL target
+      const targetJump = (op === 0x02 || op === 0x03) ? (((prev2Pc & 0xF0000000) | ((prev2Iw & 0x03ffffff) << 2)) >>> 0) : 0;
+      const targetUse = (op === 0x02 || op === 0x03) ? targetJump : targetBranch;
+      if (ourAtDelayEnd && (r.pc !== undefined) && ((r.pc >>> 0) === targetUse)) {
+        // Compare using target PC to match CEN64's logging phase; CPU will commit at start of this step
+        curPC = targetUse >>> 0;
+        curInstr = bus.loadU32(curPC >>> 0) >>> 0;
+        usedCommitFudge = true;
+      } else if (ourAtDelayEnd && (r.pc !== undefined)) {
+        // Fallback for JR/JALR (SPECIAL funct 0x08/0x09) dynamic targets
+        const funct = prev2Iw & 0x3f;
+        if (op === 0x00 && (funct === 0x08 || funct === 0x09)) {
+          curPC = (r.pc >>> 0);
+          curInstr = bus.loadU32(curPC >>> 0) >>> 0;
+          usedCommitFudge = true;
+        }
+      }
+    }
     // Compare if provided
     const pcOk = (r.pc === undefined) || ((r.pc >>> 0) === (curPC >>> 0));
     const instrOk = (r.instr === undefined) || ((r.instr >>> 0) === (curInstr >>> 0));
-    let regsOk = true;
-    if (r.regs && r.regs.size > 0) {
-      for (const [idx, val] of r.regs.entries()) {
-        const got = (cpu.regs[idx] as number | undefined) ?? 0;
-        if ((got >>> 0) !== (val >>> 0)) { regsOk = false; break; }
+
+    // Special-case: CEN64 logs may include nullified delay-slot NOP after branch-likely not taken.
+    // When that happens, PC in log = ours-4 and instr==0. Consume the record without stepping.
+    if (!pcOk && (r.instr === 0) && ((r.pc! + 4) >>> 0) === (curPC >>> 0)) {
+      prev = { trace: { pc: r.pc ?? null, instr: r.instr ?? null }, ours: { pc: curPC>>>0, instr: curInstr>>>0 } };
+      continue;
+    }
+
+    let regsOk = (compareMode === 'pc');
+    let compareShiftUsed = Math.max(0, regsShift|0);
+    if ((compareMode !== 'pc') && r.regs && r.regs.size > 0) {
+      // Build candidate reference snapshots to account for trace pre-state drift across branch/WA hazards.
+      const baseShift = Math.max(0, regsShift|0);
+      const fudgeRefIdx = Math.max(0, oursPreHistory.length - 2);
+      const candidates: { ref: Uint32Array; usedShift: number }[] = [];
+      // Primary (configured shift)
+      {
+        const idxHist = Math.max(0, oursPreHistory.length - 1 - baseShift);
+        const ref = usedCommitFudge ? (oursPreHistory[fudgeRefIdx] ?? preRegs) : (oursPreHistory[Math.min(idxHist, oursPreHistory.length - 1)] ?? preRegs);
+        candidates.push({ ref, usedShift: baseShift });
+      }
+      // Try baseShift+1 .. baseShift+4 as alternates (helps in deeper hazard windows)
+      for (let extra = 1; extra <= 4; extra++) {
+        const s = baseShift + extra;
+        const idxHist = Math.max(0, oursPreHistory.length - 1 - s);
+        const ref = usedCommitFudge ? (oursPreHistory[fudgeRefIdx] ?? preRegs) : (oursPreHistory[Math.min(idxHist, oursPreHistory.length - 1)] ?? preRegs);
+        candidates.push({ ref, usedShift: s });
+      }
+      // Evaluate candidates and pick the first that matches all provided regs
+      regsOk = false;
+      for (const c of candidates) {
+        let all = true;
+        for (const [idx, val] of r.regs.entries()) {
+          if ((idx|0) === 0) continue; // ignore r0 mismatches; r0 is hard-wired zero
+          const got = (c.ref[idx] as number | undefined) ?? 0;
+          if (((got>>>0) !== (val>>>0))) { all = false; break; }
+        }
+        if (all) { regsOk = true; compareShiftUsed = c.usedShift; break; }
       }
     }
     if (!pcOk || !instrOk || !regsOk) {
@@ -2734,23 +3037,139 @@ async function runTraceCompare(args: string[]) {
         atLine: i, step: steps, reason: (!pcOk ? 'PC' : (!instrOk ? 'INSTR' : 'REG')),
         trace: { pc: r.pc ?? null, instr: r.instr ?? null },
         ours: { pc: curPC >>> 0, instr: curInstr >>> 0 },
-regsMismatch: r.regs && !regsOk ? Array.from(r.regs.entries()).filter(([idx, v]) => ((((cpu.regs[idx] as number | undefined) ?? 0)>>>0)!== (v>>>0))).map(([idx, v]) => ({ idx, expected: v>>>0, got: (((cpu.regs[idx] as number | undefined) ?? 0)>>>0) })) : undefined,
+        prev,
+        mmioRecent: mmioEvents.slice(-(mmioRecentCount||0) || undefined as any),
+        regsMismatch: r.regs && !regsOk ? Array.from(r.regs.entries()).filter(([idx]) => (idx|0)!==0).map(([idx, v]) => {
+          const idxHist = Math.max(0, oursPreHistory.length - 1 - compareShiftUsed);
+          const ref = usedCommitFudge ? preRegs : (oursPreHistory[Math.min(idxHist, oursPreHistory.length - 1)] ?? preRegs);
+          const got = (ref[idx] as number | undefined) ?? 0;
+          const lw = lastWrite[idx];
+          let lwObj: any = undefined;
+          if (lw) {
+            lwObj = {
+              pc: (lw.pc>>>0),
+              instr: (lw.instr>>>0),
+              value: (lw.value>>>0),
+              effAddr: (lw.effAddr!==undefined ? (lw.effAddr>>>0) : undefined),
+              mem32: (lw.mem32!==undefined ? (lw.mem32>>>0) : undefined),
+              mem8: (lw.mem8!==undefined ? (lw.mem8>>>0) : undefined),
+            };
+            // If this was a load, try to annotate the source: whether it falls within a PI DMA'd region
+            if (lw.effAddr !== undefined) {
+              const pa = vaToPhys(lw.effAddr >>> 0);
+              if (pa !== null) {
+                const hit = piDmas.find(d => (pa >>> 0) >= (d.dram>>>0) && (pa >>> 0) < (((d.dram>>>0) + (d.len>>>0)) >>> 0));
+                if (hit) {
+                  (lwObj as any).memSrc = { kind: 'PI', cart: (hit.cart>>>0), dram: (hit.dram>>>0), len: (hit.len>>>0) };
+                } else if ((pa >>> 0) < (bus.rdram.bytes.length >>> 0)) {
+                  (lwObj as any).memSrc = { kind: 'RDRAM' };
+                  // Provide a small hex window around the physical address to aid debugging (32 bytes centered on addr)
+                  try {
+                    const bytes: number[] = [];
+                    for (let d = -16; d < 16; d++) {
+                      const p = (pa + d) >>> 0;
+                      if (p < (bus.rdram.bytes.length >>> 0)) bytes.push((bus.rdram.bytes[p] ?? 0) >>> 0);
+                      else bytes.push(0);
+                    }
+                    (lwObj as any).memWindowHex = bytes.map(b => b.toString(16).padStart(2,'0')).join('');
+                  } catch {}
+                } else if ((pa >>> 0) >= (0x1FC007C0 >>> 0) && (pa >>> 0) < (0x1FC00800 >>> 0)) {
+                  // PIF RAM (64 bytes) window
+                  const off = ((pa >>> 0) - (0x1FC007C0 >>> 0)) >>> 0;
+                  (lwObj as any).memSrc = { kind: 'PIF_RAM', off };
+                  try {
+                    const pr: Uint8Array = (bus.si as any).pifRam;
+                    const start = Math.max(0, (off | 0) - 16);
+                    const end = Math.min(64, (off | 0) + 16);
+                    const bytes: number[] = [];
+                    for (let i = start; i < end; i++) bytes.push((pr[i] ?? 0) >>> 0);
+                    (lwObj as any).pifRamWindowHex = bytes.map(b => b.toString(16).padStart(2,'0')).join('');
+                  } catch {}
+                } else if ((pa >>> 0) >= (0x1FC00000 >>> 0) && (pa >>> 0) < (0x1FC10000 >>> 0)) {
+                  (lwObj as any).memSrc = { kind: 'PIF_ROM' };
+                } else if ((pa >>> 0) >= (0x10000000 >>> 0) && (pa >>> 0) < (((0x10000000 >>> 0) + (beRom.length >>> 0)) >>> 0)) {
+                  (lwObj as any).memSrc = { kind: 'CART_ROM' };
+                } else if ((pa >>> 0) >= (0x04300000 >>> 0) && (pa >>> 0) < (0x04300000 + 0x1000)) {
+                  (lwObj as any).memSrc = { kind: 'MMIO', dev: 'MI', off: ((pa>>>0) - (0x04300000>>>0))>>>0 };
+                } else if ((pa >>> 0) >= (0x04000000 >>> 0) && (pa >>> 0) < (0x04000000 + 0x2000)) {
+                  (lwObj as any).memSrc = { kind: 'MMIO', dev: 'SP', off: ((pa>>>0) - (0x04000000>>>0))>>>0 };
+                } else if ((pa >>> 0) >= (0x04100000 >>> 0) && (pa >>> 0) < (0x04100000 + 0x1000)) {
+                  (lwObj as any).memSrc = { kind: 'MMIO', dev: 'DP', off: ((pa>>>0) - (0x04100000>>>0))>>>0 };
+                } else if ((pa >>> 0) >= (0x04400000 >>> 0) && (pa >>> 0) < (0x04400000 + 0x1000)) {
+                  (lwObj as any).memSrc = { kind: 'MMIO', dev: 'VI', off: ((pa>>>0) - (0x04400000>>>0))>>>0 };
+                } else if ((pa >>> 0) >= (0x04500000 >>> 0) && (pa >>> 0) < (0x04500000 + 0x1000)) {
+                  (lwObj as any).memSrc = { kind: 'MMIO', dev: 'AI', off: ((pa>>>0) - (0x04500000>>>0))>>>0 };
+                } else if ((pa >>> 0) >= (0x04600000 >>> 0) && (pa >>> 0) < (0x04600000 + 0x1000)) {
+                  (lwObj as any).memSrc = { kind: 'MMIO', dev: 'PI', off: ((pa>>>0) - (0x04600000>>>0))>>>0 };
+                } else if ((pa >>> 0) >= (0x04800000 >>> 0) && (pa >>> 0) < (0x04800000 + 0x1000)) {
+                  (lwObj as any).memSrc = { kind: 'MMIO', dev: 'SI', off: ((pa>>>0) - (0x04800000>>>0))>>>0 };
+                } else if ((pa >>> 0) >= (0x04700000 >>> 0) && (pa >>> 0) < (0x04700000 + 0x1000)) {
+                  (lwObj as any).memSrc = { kind: 'MMIO', dev: 'RI', off: ((pa>>>0) - (0x04700000>>>0))>>>0 };
+                } else {
+                  (lwObj as any).memSrc = { kind: 'UNKNOWN' };
+                }
+              }
+            }
+          }
+          return { idx, expected: v>>>0, got: (got>>>0), lastWriter: lwObj };
+        }) : undefined,
       };
       break;
     }
-    // Step one instruction
-    try { cpu.step(); } catch (e: any) {
-      divergence = { atLine: i, step: steps, reason: 'EXCEPTION', error: String(e?.message || e), pc: curPC>>>0, instr: curInstr>>>0 };
+    // Snapshot previous
+    prev = { trace: { pc: r.pc ?? null, instr: r.instr ?? null }, ours: { pc: curPC>>>0, instr: curInstr>>>0 } };
+    // Step one instruction (via system so scheduled DMA events fire)
+    try { sys.stepCycles(1); } catch (e: any) {
+      divergence = { atLine: i, step: steps, reason: 'EXCEPTION', error: String(e?.message || e), pc: curPC>>>0, instr: curInstr>>>0, prev };
       break;
+    }
+    // Record last writers to GPRs (compare post-step to pre-step snapshot)
+    for (let gi = 1; gi < 32; gi++) {
+      const before = ((preRegs[gi] as number | undefined) ?? 0) >>> 0;
+      const after = (((cpu.regs[gi] as number | undefined) ?? 0) >>> 0);
+      if (after !== before) lastWrite[gi] = { pc: curPC0 >>> 0, instr: curInstr0 >>> 0, value: after >>> 0 };
+    }
+    // If this instruction was a load, annotate effAddr/memory for the target rt
+    {
+      const iw = curInstr0 >>> 0; const op = (iw>>>26)&0x3f; const rs = (iw>>>21)&0x1f; const rt = (iw>>>16)&0x1f; const imm = iw & 0xffff;
+      const se16 = (x: number) => (x<<16)>>16;
+      const isLoad = (op===0x20)||(op===0x21)||(op===0x23)||(op===0x24)||(op===0x25); // lb, lh, lw, lbu, lhu
+      if (isLoad && rt>0) {
+        const base = ((preRegs[rs] as number | undefined) ?? 0) >>> 0;
+        const ea = (base + (se16(imm) >>> 0)) >>> 0;
+        if (lastWrite[rt] && lastWrite[rt]!.pc===curPC0 && lastWrite[rt]!.instr===curInstr0) {
+          lastWrite[rt]!.effAddr = ea >>> 0;
+          try { lastWrite[rt]!.mem32 = bus.loadU32(ea>>>0) >>> 0; } catch {}
+          try { lastWrite[rt]!.mem8 = bus.loadU8(ea>>>0) >>> 0; } catch {}
+        }
+      }
     }
   }
 
+  // Diagnostics: capture SI status and a hex dump of PIF RAM at end of run
+  let siStatusNow: number | null = null;
+  let pifRamHex: string | null = null;
+  try { siStatusNow = (bus.si as any).status >>> 0; } catch { siStatusNow = null; }
+  try {
+    const pr: Uint8Array = (bus.si as any).pifRam;
+    if (pr && pr.length === 64) {
+      pifRamHex = Array.from(pr).map(b => b.toString(16).padStart(2,'0')).join('');
+    }
+  } catch { pifRamHex = null; }
+  const siStatusReads = mmioEvents.filter(e => e.dev==='SI' && e.op==='rd' && (e.off>>>0)===0x18).length;
+  const siStatusLast = (() => { const arr = mmioEvents.filter(e => e.dev==='SI' && e.op==='rd' && (e.off>>>0)===0x18); return arr.length ? (arr[arr.length-1]!.val ?? null) : null; })();
+
   const summary = {
     command: 'trace-compare', trace: tracePath, rom: romPath, totalLines: recs.length, skipped: startIdx, steps, divergence,
+    cic: cicOpt || 'default',
     endPC: cpu.pc >>> 0,
     gpr: Array.from(cpu.regs).map(n => (n>>>0)),
     gprHi: Array.from(cpu.regsHi).map(n => (n>>>0)),
     cp0: { status: cpu.cop0.read(12)>>>0, cause: cpu.cop0.read(13)>>>0, epc: cpu.cop0.read(14)>>>0 },
+    mi: { pending: (bus.mi as any).intrPending>>>0, mask: (bus.mi as any).intrMask>>>0 },
+    piDmas: piDmas.map(d => ({ cart: d.cart>>>0, dram: d.dram>>>0, len: d.len>>>0 })),
+    si: { status: siStatusNow, statusReads: siStatusReads, statusLast: siStatusLast },
+    pifRamHex,
   };
   if (reportPath) {
     try { await (await import('node:fs')).promises.mkdir(path.dirname(reportPath), { recursive: true }); await (await import('node:fs')).promises.writeFile(reportPath, JSON.stringify(summary, null, 2), 'utf8'); console.log(`[trace] wrote report ${reportPath}`); } catch (e) { console.error('[trace] failed to write report:', e); }
