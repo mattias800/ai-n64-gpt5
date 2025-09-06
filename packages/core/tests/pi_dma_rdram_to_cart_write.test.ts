@@ -32,7 +32,6 @@ describe('PI WR_LEN RDRAM->cart write-back', () => {
     // Busy flags should set immediately
     let st = r32(bus, PI_BASE + PI_STATUS_OFF);
     expect((st & PI_STATUS_DMA_BUSY) !== 0).toBe(true);
-    expect((st & PI_STATUS_IO_BUSY) !== 0).toBe(true);
 
     // Complete DMA -> clears busy and raises MI pending
     bus.pi.completeDMA();

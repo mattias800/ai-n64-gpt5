@@ -6,7 +6,7 @@ function w32(bus: Bus, addr: number, val: number) { bus.storeU32(addr >>> 0, val
 function r32(bus: Bus, addr: number) { return bus.loadU32(addr >>> 0) >>> 0; }
 
 describe('PI IO_BUSY semantics', () => {
-  it('sets IO_BUSY on RD/WR LEN; clears via STATUS write; clears on completeDMA and raises MI PI pending', () => {
+  it('does not set IO_BUSY on RD/WR LEN (CEN64-compatible); DMA_BUSY is set; MI PI pending raised on completion', () => {
     const bus = new Bus(new RDRAM(0x2000));
 
     // Program addresses
@@ -17,7 +17,7 @@ describe('PI IO_BUSY semantics', () => {
     w32(bus, PI_BASE + PI_RD_LEN_OFF, 0x0000000F);
     let st = r32(bus, PI_BASE + PI_STATUS_OFF);
     expect((st & PI_STATUS_DMA_BUSY) !== 0).toBe(true);
-    expect((st & PI_STATUS_IO_BUSY) !== 0).toBe(true);
+    expect((st & PI_STATUS_IO_BUSY) !== 0).toBe(false);
 
     // Clear IO_BUSY only via STATUS write; DMA_BUSY remains
     w32(bus, PI_BASE + PI_STATUS_OFF, PI_STATUS_IO_BUSY);
@@ -25,10 +25,10 @@ describe('PI IO_BUSY semantics', () => {
     expect((st & PI_STATUS_IO_BUSY) !== 0).toBe(false);
     expect((st & PI_STATUS_DMA_BUSY) !== 0).toBe(true);
 
-    // Start a write DMA: IO_BUSY sets again
+    // Start a write DMA: IO_BUSY remains clear (IO_BUSY is not used on DMA start)
     w32(bus, PI_BASE + PI_WR_LEN_OFF, 0x0000001F);
     st = r32(bus, PI_BASE + PI_STATUS_OFF);
-    expect((st & PI_STATUS_IO_BUSY) !== 0).toBe(true);
+    expect((st & PI_STATUS_IO_BUSY) !== 0).toBe(false);
 
     // Enable MI mask for PI and complete DMA -> clears both busy and raises MI PI pending
     w32(bus, MI_BASE + MI_INTR_MASK_OFF, 1 << 4);

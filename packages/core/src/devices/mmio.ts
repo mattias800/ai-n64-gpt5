@@ -38,15 +38,21 @@ export class MMIO {
 }
 
 // RI (RDRAM Interface) - minimal stub for IPL3
+// Real register layout per hardware/CEN64:
+// 0x00 MODE, 0x04 CONFIG, 0x08 CURRENT_LOAD, 0x0C SELECT, 0x10 REFRESH, 0x14 LATENCY, 0x18 RERROR, 0x1C WERROR
 export const RI_MODE_OFF = 0x00;
 export const RI_CONFIG_OFF = 0x04;
-export const RI_REFRESH_OFF = 0x08;
-export const RI_LATENCY_OFF = 0x0C;
-export const RI_RERROR_OFF = 0x10;
-export const RI_WERROR_OFF = 0x14;
+export const RI_CURRENT_LOAD_OFF = 0x08;
+export const RI_SELECT_OFF = 0x0C;
+export const RI_REFRESH_OFF = 0x10;
+export const RI_LATENCY_OFF = 0x14;
+export const RI_RERROR_OFF = 0x18;
+export const RI_WERROR_OFF = 0x1C;
 export class RI extends MMIO {
   mode = 0 >>> 0;
   config = 0 >>> 0;
+  currentLoad = 0 >>> 0;
+  select = 0x14 >>> 0; // Hardware reset default observed in traces
   refresh = 0 >>> 0;
   latency = 0 >>> 0;
   rerror = 0 >>> 0;
@@ -56,6 +62,8 @@ export class RI extends MMIO {
     switch (off >>> 0) {
       case RI_MODE_OFF: return this.mode >>> 0;
       case RI_CONFIG_OFF: return this.config >>> 0;
+      case RI_CURRENT_LOAD_OFF: return this.currentLoad >>> 0;
+      case RI_SELECT_OFF: return this.select >>> 0;
       case RI_REFRESH_OFF: return this.refresh >>> 0;
       case RI_LATENCY_OFF: return this.latency >>> 0;
       case RI_RERROR_OFF: return this.rerror >>> 0;
@@ -68,6 +76,8 @@ export class RI extends MMIO {
     switch (off >>> 0) {
       case RI_MODE_OFF: this.mode = val; return;
       case RI_CONFIG_OFF: this.config = val; return;
+      case RI_CURRENT_LOAD_OFF: this.currentLoad = val; return;
+      case RI_SELECT_OFF: this.select = val; return;
       case RI_REFRESH_OFF: this.refresh = val; return;
       case RI_LATENCY_OFF: this.latency = val; return;
       case RI_RERROR_OFF: this.rerror = val; return;
@@ -170,7 +180,7 @@ export const SP_CMD_START = 1 << 0; // writing 1 to MEM_ADDR is treated as START
 export const SP_STATUS_OFF = 0x10;
 export const SP_STATUS_INTR = 1 << 0; // legacy: previously used to clear intr; we now treat bit0 as CLR_HALT (start)
 export class SP extends MMIO {
-  status = 0 >>> 0;
+  status = 1 >>> 0; // HALT bit set at reset for status readback compatibility
   private mi: MI | null = null;
   private rdram: Uint8Array | null = null;
   // Minimal 4KB DMEM/IMEM buffers
@@ -271,6 +281,8 @@ case SP_STATUS_OFF: {
         const w = mergeAckMask(val);
         if (w & 0x1) {
           this.halted = false;
+          // Clear HALT bit in status
+          this.status = (this.status & ~1) >>> 0;
           if (this.mi) this.mi.clear(MI_INTR_SP);
           // Invoke optional start callback for HLE bridging/instrumentation
           try { this.onStart && this.onStart(); } catch {}
@@ -345,7 +357,7 @@ export class DP extends MMIO {
   dpcStart = 0 >>> 0;
   dpcEnd = 0 >>> 0;
   dpcCurrent = 0 >>> 0;
-  dpcStatus = DPC_STATUS_CBUF_READY >>> 0;  // CBUF ready by default
+  dpcStatus = 0 >>> 0;  // Reset default: all status bits clear to match hardware reset and trace expectations
   dpcClock = 0 >>> 0;
   dpcBufBusy = 0 >>> 0;
   dpcPipeBusy = 0 >>> 0;
@@ -642,6 +654,9 @@ export class PI extends MMIO {
   rdLen = 0 >>> 0;
   wrLen = 0 >>> 0;
   status = 0 >>> 0;
+  // PI domain configuration registers (latency/page-size/pulse-width), latched for readback
+  dom1Lat = 0 >>> 0; dom1Pgs = 0 >>> 0; dom1Pwd = 0 >>> 0; dom1Pgs2 = 0 >>> 0;
+  dom2Lat = 0 >>> 0; dom2Pgs = 0 >>> 0; dom2Pwd = 0 >>> 0; dom2Pgs2 = 0 >>> 0;
   private mi: MI | null = null;
   private rom: Uint8Array | null = null;
   private sram: Uint8Array | null = null;
@@ -650,6 +665,9 @@ export class PI extends MMIO {
   private allowROMWrites = false;
   private dmaCompletionCallback: (() => void) | null = null;
   private dmaCompletionCycles = 0;
+  // Latency model parameters (tunable)
+  private latBase = 50; // setup cycles
+  private latBytesPerCycle = 2; // transfer throughput
   constructor() { super(PI_SIZE); }
   setMI(mi: MI) { this.mi = mi; }
   setROM(rom: Uint8Array) { this.rom = rom; }
@@ -657,6 +675,13 @@ export class PI extends MMIO {
   setFlashRAM(flash: FlashRAM) { this.flash = flash; }
   setRDRAM(bytes: Uint8Array) { this.rdram = bytes; }
   setAllowROMWrites(flag: boolean): void { this.allowROMWrites = !!flag; }
+  // Override latency model
+  setLatencyModel(baseCycles: number, bytesPerCycle: number): void {
+    const b = Math.max(0, baseCycles | 0);
+    const t = Math.max(1, bytesPerCycle | 0);
+    this.latBase = b;
+    this.latBytesPerCycle = t;
+  }
   
   // Set a callback for scheduling DMA completion with specified cycle delay
   setDMAScheduler(scheduler: (cycles: number, callback: () => void) => void): void {
@@ -668,9 +693,8 @@ export class PI extends MMIO {
   private calculateDMALatency(length: number): number {
     // Simplified model: base latency + per-byte transfer time
     // Real hardware has more complex timing based on domain and alignment
-    const baseLatency = 50; // Base cycles for DMA setup
-    const bytesPerCycle = 2; // Approximate transfer rate
-    return baseLatency + Math.ceil(length / bytesPerCycle);
+    const len = Math.max(0, length | 0);
+    return (this.latBase >>> 0) + Math.ceil(len / Math.max(1, this.latBytesPerCycle | 0));
   }
   override readU32(off: number): number {
     switch (off >>> 0) {
@@ -679,6 +703,14 @@ export class PI extends MMIO {
       case PI_RD_LEN_OFF: return this.rdLen >>> 0;
       case PI_WR_LEN_OFF: return this.wrLen >>> 0;
       case PI_STATUS_OFF: return this.status >>> 0;
+      case 0x14: return this.dom1Lat >>> 0;
+      case 0x18: return this.dom1Pgs >>> 0;
+      case 0x1C: return this.dom1Pwd >>> 0;
+      case 0x20: return this.dom1Pgs2 >>> 0;
+      case 0x24: return this.dom2Lat >>> 0;
+      case 0x28: return this.dom2Pgs >>> 0;
+      case 0x2C: return this.dom2Pwd >>> 0;
+      case 0x30: return this.dom2Pgs2 >>> 0;
       default: return super.readU32(off);
     }
   }
@@ -688,7 +720,7 @@ export class PI extends MMIO {
       case PI_DRAM_ADDR_OFF: this.dramAddr = val; return;
       case PI_CART_ADDR_OFF: this.cartAddr = val; return;
       case PI_RD_LEN_OFF:
-        this.rdLen = val; this.status |= (PI_STATUS_DMA_BUSY | PI_STATUS_IO_BUSY);
+        this.rdLen = val; this.status |= PI_STATUS_DMA_BUSY;
         // Perform a synchronous copy from cart space -> RDRAM based on CART_ADDR mapping
         const rdLen = ((val & 0x00ffffff) >>> 0) + 1;
         if (this.rdram) {
@@ -715,8 +747,9 @@ export class PI extends MMIO {
           }
           // ROM domain or raw offset
           if (!handled && this.rom) {
-            let baseRom = ca;
-            if ((baseRom >>> 28) === 0x1) baseRom = (baseRom - CART_ROM_BASE) >>> 0;
+            // Normalize cart address to physical and into ROM buffer-space
+            const phys = (ca & 0x1fffffff) >>> 0;
+            let baseRom = phys >= CART_ROM_BASE ? (phys - CART_ROM_BASE) >>> 0 : phys >>> 0;
             for (let i = 0; i < rdLen; i++) {
               const b = (baseRom + i) < this.rom.length ? (this.rom[baseRom + i] ?? 0) : 0;
               if (baseRam + i < this.rdram.length) this.rdram[baseRam + i] = b;
@@ -745,7 +778,7 @@ export class PI extends MMIO {
         // The calling environment must handle completion explicitly
         return;
       case PI_WR_LEN_OFF:
-        this.wrLen = val; this.status |= (PI_STATUS_DMA_BUSY | PI_STATUS_IO_BUSY);
+        this.wrLen = val; this.status |= PI_STATUS_DMA_BUSY;
         // WR_LEN: copy from RDRAM[dramAddr] -> cart space at CART_ADDR (Flash preferred; SRAM next; ROM writes optional)
         const wrLen = ((val & 0x00ffffff) >>> 0) + 1;
         if (this.rdram) {
@@ -772,8 +805,8 @@ export class PI extends MMIO {
           }
           // ROM write-back (behind flag)
           if (!handled && this.rom && (this.allowROMWrites || envFlag('N64_ALLOW_ROM_WRITES'))) {
-            let baseRom = ca;
-            if ((baseRom >>> 28) === 0x1) baseRom = (baseRom - CART_ROM_BASE) >>> 0;
+            const phys = (ca & 0x1fffffff) >>> 0;
+            let baseRom = phys >= CART_ROM_BASE ? (phys - CART_ROM_BASE) >>> 0 : phys >>> 0;
             for (let i = 0; i < wrLen; i++) {
               if ((baseRam + i) < this.rdram.length && (baseRom + i) < this.rom.length) {
                 this.rom[baseRom + i] = this.rdram[baseRam + i]!;
@@ -802,7 +835,7 @@ export class PI extends MMIO {
         // If no scheduler and not in test mode, leave DMA busy
         // The calling environment must handle completion explicitly
         return;
-case PI_STATUS_OFF:
+      case PI_STATUS_OFF:
         // Writing 1 bits clears corresponding busy flags.
         // Only clearing DMA_BUSY should also clear the MI PI pending per test expectations.
         {
@@ -816,6 +849,15 @@ case PI_STATUS_OFF:
           }
           return;
         }
+      // Domain timing configuration registers
+      case 0x14: this.dom1Lat = val>>>0; return;
+      case 0x18: this.dom1Pgs = val>>>0; return;
+      case 0x1C: this.dom1Pwd = val>>>0; return;
+      case 0x20: this.dom1Pgs2 = val>>>0; return;
+      case 0x24: this.dom2Lat = val>>>0; return;
+      case 0x28: this.dom2Pgs = val>>>0; return;
+      case 0x2C: this.dom2Pwd = val>>>0; return;
+      case 0x30: this.dom2Pgs2 = val>>>0; return;
       default: super.writeU32(off, val); return;
     }
   }
@@ -855,6 +897,8 @@ export const SI_PIF_ADDR_RD64B_OFF = 0x04;
 export const SI_PIF_ADDR_WR64B_OFF = 0x10;
 export const SI_STATUS_OFF = 0x18;
 export const SI_STATUS_DMA_BUSY = 1 << 0;
+export const SI_STATUS_IO_BUSY = 1 << 1;
+export const SI_STATUS_PIF_BUSY = 1 << 12; // mirrors CEN64's 0x1000 behavior
 
 export class SI extends MMIO {
   dramAddr = 0 >>> 0;
@@ -864,9 +908,29 @@ export class SI extends MMIO {
   private mi: MI | null = null;
   private rdram: Uint8Array | null = null;
   readonly pifRam = new Uint8Array(64);
+  // Optional scheduler for DMA completion; if unset, DMA completes immediately only in test environments
+  private dmaScheduler: ((cycles: number, callback: () => void) => void) | null = null;
+  // Optional latency override for 64B transfers
+  private latencyCycles: number | null = null;
+  // Feature toggle: defer processing of PIF commands written via WR64B until DMA completes
+  private deferPifProcess: boolean = false;
+  private pifNeedsProcess: boolean = false;
+  // Optional: after DMA completes, automatically clear IO_BUSY after a small delay (hardware-like behavior)
+  private autoClearIoBusyDelay: number = 0; // cycles; 0 = disabled
+  // Behavior toggle: raise MI interrupt on kick (default true for deterministic tests); if false, raise on DMA complete
+  private interruptOnKick: boolean = true;
   constructor() { super(SI_SIZE); }
   setMI(mi: MI) { this.mi = mi; }
   setRDRAM(bytes: Uint8Array) { this.rdram = bytes; }
+  setDMAScheduler(scheduler: (cycles: number, callback: () => void) => void): void { this.dmaScheduler = scheduler; }
+  setLatency(cycles: number): void { this.latencyCycles = Math.max(1, cycles | 0); }
+  setDeferPIF(defer: boolean): void { this.deferPifProcess = !!defer; }
+  // Configure auto-clear of IO_BUSY after DMA completion (DMA_BUSY remains set until STATUS ack as before)
+  setAutoClearIoBusyDelay(cycles: number): void { this.autoClearIoBusyDelay = Math.max(0, cycles | 0); }
+  // Configure whether to signal MI immediately on kick or only when DMA completes
+  setInterruptOnKick(enabled: boolean): void { this.interruptOnKick = !!enabled; }
+  // Simplified SI latency model for 64B transfers (constant for now; refine later)
+  private calculateDMALatency(): number { const o = this.latencyCycles; return (o !== null && o > 0) ? (o >>> 0) : 64; }
   override readU32(off: number): number {
     switch (off >>> 0) {
       case SI_DRAM_ADDR_OFF: return this.dramAddr >>> 0;
@@ -882,26 +946,42 @@ export class SI extends MMIO {
       case SI_DRAM_ADDR_OFF: this.dramAddr = val; return;
       case SI_PIF_ADDR_RD64B_OFF: this.pifAddrRd = val; this.kickRead64B(); return;
       case SI_PIF_ADDR_WR64B_OFF: this.pifAddrWr = val; this.kickWrite64B(); return;
-case SI_STATUS_OFF:
+      case SI_STATUS_OFF:
         {
           const w = mergeAckMask(val);
+          // Acknowledge DMA completion: clear DMA_BUSY and the interrupt; also clear IO_BUSY on ack
           if (w & SI_STATUS_DMA_BUSY) {
             this.status &= ~SI_STATUS_DMA_BUSY;
+            this.status &= ~SI_STATUS_IO_BUSY;
             if (this.mi) this.mi.clear(MI_INTR_SI);
           }
+          // Explicit IO_BUSY clear is still honored (no-op if already cleared above)
+          if (w & SI_STATUS_IO_BUSY) {
+            this.status &= ~SI_STATUS_IO_BUSY;
+          }
+          // Per CEN64 semantics: any write to SI_STATUS clears the 0x1000 latch
+          this.status &= ~SI_STATUS_PIF_BUSY;
           return;
         }
       default: super.writeU32(off, val); return;
     }
   }
-  // Simulate DMA completion: clear busy and raise MI interrupt
+  // Simulate DMA completion: optionally raise MI (only if not already raised on kick), keep IO_BUSY until cleared
+  // Leave DMA_BUSY asserted until STATUS ack clears it (and IO_BUSY) together
   completeDMA(): void {
-    this.status &= ~SI_STATUS_DMA_BUSY;
-    if (this.mi) this.mi.raise(MI_INTR_SI);
+    if (this.pifNeedsProcess) { try { this.processPIF(); } catch {} this.pifNeedsProcess = false; }
+    if (!this.interruptOnKick) {
+      if (this.mi) this.mi.raise(MI_INTR_SI);
+    }
+    // Optionally auto-clear IO_BUSY a few cycles after DMA completion to better match hardware
+    if (this.autoClearIoBusyDelay > 0 && this.dmaScheduler) {
+      const delay = this.autoClearIoBusyDelay >>> 0;
+      this.dmaScheduler(delay, () => { this.status &= ~SI_STATUS_IO_BUSY; });
+    }
   }
   // Deterministic 64B write: RDRAM -> PIF RAM
   kickWrite64B(): void {
-    this.status |= SI_STATUS_DMA_BUSY;
+    this.status |= (SI_STATUS_DMA_BUSY | SI_STATUS_IO_BUSY | SI_STATUS_PIF_BUSY);
     const base = this.dramAddr >>> 0;
     if (this.rdram) {
       for (let i = 0; i < 64; i++) {
@@ -909,41 +989,55 @@ case SI_STATUS_OFF:
         this.pifRam[i] = v;
       }
     }
-    // Minimal PIF command emulation to preserve legacy tests and unblock boot code
-    try {
-      const cmd = (this.pifRam[0] ?? 0) >>> 0;
-      const port = (this.pifRam[63] ?? 0) & 0x03;
-      if (cmd === 0x01) {
-        // ACK: set magic response for tests
-        this.pifRam[1] = 0x5a;
-      } else if (cmd === 0x02) {
-        // ECHO: copy byte [1] to [2]
-        this.pifRam[2] = this.pifRam[1] ?? 0;
-      } else if (cmd === 0x10) {
-        // Controller status: present only on port 0
-        this.pifRam[1] = (port === 0) ? 0x01 : 0x00; // present flag
-        this.pifRam[2] = 0x00; // pak type (0 = none)
-        this.pifRam[3] = 0x00; // reserved
-      } else if (cmd === 0x11) {
-        // Controller state: only valid on port 0; others return error status 0xFF and zero state
-        if (port === 0) {
-          this.pifRam[1] = 0x00; // status OK
-          this.pifRam[2] = 0x12; // buttons hi
-          this.pifRam[3] = 0x34; // buttons lo
-          this.pifRam[4] = 0x05; // stick X = +5
-          this.pifRam[5] = 0xFB; // stick Y = -5
-        } else {
-          this.pifRam[1] = 0xFF; // error/not present
-          this.pifRam[2] = 0x00;
-          this.pifRam[3] = 0x00;
-          this.pifRam[4] = 0x00;
-          this.pifRam[5] = 0x00;
+    // Process now or defer until DMA completes
+    if (this.deferPifProcess) {
+      this.pifNeedsProcess = true;
+    } else {
+      try {
+        const cmd = (this.pifRam[0] ?? 0) >>> 0;
+        const port = (this.pifRam[63] ?? 0) & 0x03;
+        if (cmd === 0x01) {
+          // ACK: set magic response for tests
+          this.pifRam[1] = 0x5a;
+        } else if (cmd === 0x02) {
+          // ECHO: copy byte [1] to [2]
+          this.pifRam[2] = this.pifRam[1] ?? 0;
+        } else if (cmd === 0x10) {
+          // Controller status: present only on port 0
+          this.pifRam[1] = (port === 0) ? 0x01 : 0x00; // present flag
+          this.pifRam[2] = 0x00; // pak type (0 = none)
+          this.pifRam[3] = 0x00; // reserved
+        } else if (cmd === 0x11) {
+          // Controller state: only valid on port 0; others return error status 0xFF and zero state
+          if (port === 0) {
+            this.pifRam[1] = 0x00; // status OK
+            this.pifRam[2] = 0x12; // buttons hi
+            this.pifRam[3] = 0x34; // buttons lo
+            this.pifRam[4] = 0x05; // stick X = +5
+            this.pifRam[5] = 0xFB; // stick Y = -5
+          } else {
+            this.pifRam[1] = 0xFF; // error/not present
+            this.pifRam[2] = 0x00;
+            this.pifRam[3] = 0x00;
+            this.pifRam[4] = 0x00;
+            this.pifRam[5] = 0x00;
+          }
         }
-      }
-    } catch {}
-    // Interpret the written PIF RAM and prepare a response
-    this.processPIF();
-    if (this.mi) this.mi.raise(MI_INTR_SI);
+      } catch {}
+      // Interpret the written PIF RAM and prepare a response
+      this.processPIF();
+    }
+    // Immediately signal MI on kick if enabled (deterministic tests)
+    if (this.interruptOnKick) {
+      if (this.mi) this.mi.raise(MI_INTR_SI);
+    }
+    // Schedule DMA completion; hardware-like environments may prefer to only signal on completion via completeDMA
+    const latency = this.calculateDMALatency();
+    if (this.dmaScheduler) {
+      this.dmaScheduler(latency, () => this.completeDMA());
+    } else if (envFlag('N64_TESTS')) {
+      this.completeDMA();
+    }
   }
 
   private processPIF(): void {
@@ -1010,7 +1104,7 @@ case SI_STATUS_OFF:
   }
   // Deterministic 64B read: PIF RAM -> RDRAM
   kickRead64B(): void {
-    this.status |= SI_STATUS_DMA_BUSY;
+    this.status |= (SI_STATUS_DMA_BUSY | SI_STATUS_IO_BUSY | SI_STATUS_PIF_BUSY);
     const base = this.dramAddr >>> 0;
     if (this.rdram) {
       for (let i = 0; i < 64; i++) {
@@ -1018,6 +1112,16 @@ case SI_STATUS_OFF:
         if (base + i < this.rdram.length) this.rdram[base + i] = v;
       }
     }
-    if (this.mi) this.mi.raise(MI_INTR_SI);
+    // Immediately signal MI on kick if enabled (deterministic tests)
+    if (this.interruptOnKick) {
+      if (this.mi) this.mi.raise(MI_INTR_SI);
+    }
+    // Schedule DMA completion; hardware-like environments may prefer to only signal on completion via completeDMA
+    const latency = this.calculateDMALatency();
+    if (this.dmaScheduler) {
+      this.dmaScheduler(latency, () => this.completeDMA());
+    } else if (envFlag('N64_TESTS')) {
+      this.completeDMA();
+    }
   }
 }
